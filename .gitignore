@@ -1,6 +1,17 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Node
 node_modules/
-.wrangler/
+npm-debug.log*
+
+# Python
 __pycache__/
-*.pyc
-.env
-.dev.vars
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Wrangler
+.wrangler/
