@@ -310,7 +310,7 @@ function mscLink(cn) {
 }
 
 function vesselLink(imo, name) {
-  if (imo) return 'https://www.marinetraffic.com/en/ais/details/ships/shipid:' + imo;
+  if (imo) return 'https://www.marinetraffic.com/en/ais/details/ships/imo:' + imo;
   if (name) return 'https://www.marinetraffic.com/en/ais/home/shipname:' + encodeURIComponent(name);
   return 'https://www.marinetraffic.com/en/ais/home/centerx:-20.1/centery:13.1/zoom:5';
 }
