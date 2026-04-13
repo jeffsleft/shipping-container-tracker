@@ -542,12 +542,12 @@ function routeHtml(r) {
 function actionsInner(cn, isReceived) {
   if (isReceived) {
     return '<a href="' + mscLink(cn) + '" target="_blank" style="color:#02579a;font-size:0.75rem" class="hover:underline">MSC &#8599;</a>' +
-      ' <button onclick="removeContainer(\'' + cn + '\')" style="color:#a9adb1;font-size:0.75rem" class="hover:text-[#c4002b] hover:underline">Remove</button>';
+      ' <button onclick="removeContainer(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.75rem" class="hover:text-[#c4002b] hover:underline">Remove</button>';
   }
   return '<a href="' + mscLink(cn) + '" target="_blank" style="color:#02579a;font-size:0.75rem" class="hover:underline">MSC &#8599;</a>' +
-    ' <button onclick="showHistory(\'' + cn + '\')" style="color:#a9adb1;font-size:0.75rem" class="hover:underline underline">History</button>' +
-    ' <button onclick="showReceivePrompt(\'' + cn + '\')" style="color:#00695b;font-size:0.75rem;font-weight:600" class="hover:underline">&#10003; Received</button>' +
-    ' <button onclick="removeContainer(\'' + cn + '\')" style="color:#d0d3d4;font-size:0.9rem;line-height:1" class="hover:text-[#c4002b]">&times;</button>';
+    ' <button onclick="showHistory(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.75rem" class="hover:underline underline">History</button>' +
+    ' <button onclick="showReceivePrompt(&apos;' + cn + '&apos;)" style="color:#00695b;font-size:0.75rem;font-weight:600" class="hover:underline">&#10003; Received</button>' +
+    ' <button onclick="removeContainer(&apos;' + cn + '&apos;)" style="color:#d0d3d4;font-size:0.9rem;line-height:1" class="hover:text-[#c4002b]">&times;</button>';
 }
 
 function actionsDiv(cn, isReceived) {
@@ -560,8 +560,8 @@ function showReceivePrompt(cn) {
   var today = new Date().toISOString().split('T')[0];
   var html = '<div class="flex items-center gap-1 flex-wrap">' +
     '<input type="date" class="rdate-' + cn + '" value="' + today + '" style="border:1px solid #e6e8e8;border-radius:6px;padding:2px 6px;font-size:0.75rem" />' +
-    ' <button onclick="confirmReceived(\'' + cn + '\')" style="background:#002663;color:#fff;font-size:0.7rem;padding:3px 10px;border-radius:6px;font-weight:600">Confirm</button>' +
-    ' <button onclick="cancelReceive(\'' + cn + '\')" style="color:#a9adb1;font-size:0.7rem">Cancel</button>' +
+    ' <button onclick="confirmReceived(&apos;' + cn + '&apos;)" style="background:#002663;color:#fff;font-size:0.7rem;padding:3px 10px;border-radius:6px;font-weight:600">Confirm</button>' +
+    ' <button onclick="cancelReceive(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.7rem">Cancel</button>' +
     '</div>';
   document.querySelectorAll('[data-actions="' + cn + '"]').forEach(function(el) { el.innerHTML = html; });
 }
