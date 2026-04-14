@@ -103,7 +103,7 @@ async function handleListPost(request, env) {
     return Response.json({ error: 'Container already in list' }, { status: 409 });
   }
   const today = new Date().toISOString().slice(0, 10);
-  containers.push({ number: number, addedAt: today, originalEta: null, received: false, receivedAt: null });
+  containers.push({ number: number, addedAt: today, originalEta: null, received: false, receivedAt: null, shipmentId: null });
   await saveContainers(env, containers);
   return Response.json({ success: true });
 }
@@ -141,6 +141,25 @@ async function handleReceive(request, env) {
   return Response.json({ success: true });
 }
 
+// ─── Route: POST /api/shipment ───────────────────────────────────────────────
+
+async function handleShipment(request, env) {
+  if (!checkPasscode(request, env)) return unauthorized();
+  let body;
+  try { body = await request.json(); } catch(e) { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
+  const number = (body.number || '').trim().toUpperCase();
+  const shipmentId = (body.shipmentId || '').trim();
+  if (!number) return Response.json({ error: 'Container number required' }, { status: 400 });
+
+  const containers = await getContainers(env);
+  const c = containers.find(function(c) { return c.number === number; });
+  if (!c) return Response.json({ error: 'Container not found' }, { status: 404 });
+
+  c.shipmentId = shipmentId || null;
+  await saveContainers(env, containers);
+  return Response.json({ success: true });
+}
+
 // ─── Route: GET /api/track ────────────────────────────────────────────────────
 
 async function handleTrackRequest(request, env) {
@@ -154,6 +173,7 @@ async function handleTrackRequest(request, env) {
     return {
       success: true, containerNumber: c.number, received: true,
       receivedAt: c.receivedAt, originalEta: c.originalEta, addedAt: c.addedAt, status: 'Received',
+      shipmentId: c.shipmentId || null,
     };
   });
 
@@ -198,6 +218,7 @@ async function handleTrackRequest(request, env) {
       received: false,
       originalEta: kvEntry ? kvEntry.originalEta : null,
       addedAt: kvEntry ? kvEntry.addedAt : null,
+      shipmentId: kvEntry ? (kvEntry.shipmentId || null) : null,
     });
   });
 
@@ -343,11 +364,12 @@ const HTML = `<!DOCTYPE html>
         <table class="w-full text-sm">
           <thead class="bg-[#f7f7f7] border-b border-[#e6e8e8]">
             <tr>
-              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Container</th>
-              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Status</th>
-              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Location</th>
+              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Transit&apos;,&apos;containerNumber&apos;)">Container <span id="sort-Transit-containerNumber" style="color:#c4c8cc">&#8645;</span></th>
+              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Transit&apos;,&apos;shipmentId&apos;)">Shipment # <span id="sort-Transit-shipmentId" style="color:#c4c8cc">&#8645;</span></th>
+              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Transit&apos;,&apos;status&apos;)">Status <span id="sort-Transit-status" style="color:#c4c8cc">&#8645;</span></th>
+              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Transit&apos;,&apos;currentLocation&apos;)">Location <span id="sort-Transit-currentLocation" style="color:#c4c8cc">&#8645;</span></th>
               <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Vessel / Voyage</th>
-              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">ETA</th>
+              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Transit&apos;,&apos;podEtaDate&apos;)">ETA <span id="sort-Transit-podEtaDate" style="color:#c4c8cc">&#8645;</span></th>
               <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Route</th>
               <th class="px-4 py-3"></th>
             </tr>
@@ -369,11 +391,12 @@ const HTML = `<!DOCTYPE html>
         <table class="w-full text-sm">
           <thead class="bg-[#f7f7f7] border-b border-[#e6e8e8]">
             <tr>
-              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Container</th>
-              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Status</th>
-              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Location</th>
+              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Port&apos;,&apos;containerNumber&apos;)">Container <span id="sort-Port-containerNumber" style="color:#c4c8cc">&#8645;</span></th>
+              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Port&apos;,&apos;shipmentId&apos;)">Shipment # <span id="sort-Port-shipmentId" style="color:#c4c8cc">&#8645;</span></th>
+              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Port&apos;,&apos;status&apos;)">Status <span id="sort-Port-status" style="color:#c4c8cc">&#8645;</span></th>
+              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Port&apos;,&apos;currentLocation&apos;)">Location <span id="sort-Port-currentLocation" style="color:#c4c8cc">&#8645;</span></th>
               <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Vessel / Voyage</th>
-              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">ETA</th>
+              <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Port&apos;,&apos;podEtaDate&apos;)">ETA <span id="sort-Port-podEtaDate" style="color:#c4c8cc">&#8645;</span></th>
               <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Route</th>
               <th class="px-4 py-3"></th>
             </tr>
@@ -399,10 +422,11 @@ const HTML = `<!DOCTYPE html>
           <table class="w-full text-sm">
             <thead class="bg-[#f7f7f7] border-b border-[#e6e8e8]">
               <tr>
-                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Container</th>
-                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Original ETA</th>
-                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Date Received</th>
-                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Variance</th>
+                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;containerNumber&apos;)">Container <span id="sort-Received-containerNumber" style="color:#c4c8cc">&#8645;</span></th>
+                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;shipmentId&apos;)">Shipment # <span id="sort-Received-shipmentId" style="color:#c4c8cc">&#8645;</span></th>
+                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;originalEta&apos;)">Original ETA <span id="sort-Received-originalEta" style="color:#c4c8cc">&#8645;</span></th>
+                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;receivedAt&apos;)">Date Received <span id="sort-Received-receivedAt" style="color:#c4c8cc">&#8645;</span></th>
+                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;variance&apos;)">Variance <span id="sort-Received-variance" style="color:#c4c8cc">&#8645;</span></th>
                 <th class="px-4 py-3"></th>
               </tr>
             </thead>
@@ -438,6 +462,8 @@ const HTML = `<!DOCTYPE html>
 var lastResults = {};
 var timerInterval = null;
 var receivedOpen = false;
+var sortState = { Transit: { col: null, dir: 'asc' }, Port: { col: null, dir: 'asc' }, Received: { col: null, dir: 'asc' } };
+var allTransit = [], allPort = [], allReceived = [];
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
@@ -554,6 +580,60 @@ function actionsDiv(cn, isReceived) {
   return '<div data-actions="' + cn + '" class="flex gap-2 items-center flex-wrap">' + actionsInner(cn, isReceived) + '</div>';
 }
 
+// ── Shipment # cell ───────────────────────────────────────────────────────────
+
+function shipmentCellInner(cn, sid) {
+  if (sid) {
+    return '<span style="color:#262f3d;font-size:0.8rem">' + sid + '</span>' +
+      ' <button onclick="showShipmentEdit(&apos;' + cn + '&apos;)" style="color:#c4c8cc;font-size:0.75rem" title="Edit">&#9998;</button>';
+  }
+  return '<button onclick="showShipmentEdit(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.75rem" class="hover:text-[#02579a]">+ Add #</button>';
+}
+
+function shipmentCell(cn, sid) {
+  return '<div data-shipment="' + cn + '">' + shipmentCellInner(cn, sid) + '</div>';
+}
+
+function showShipmentEdit(cn) {
+  var r = lastResults[cn];
+  var current = (r && r.shipmentId) ? r.shipmentId : '';
+  var html = '<span class="flex items-center gap-1 flex-wrap">' +
+    '<input type="text" class="sedit-' + cn + '" value="' + current.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '" placeholder="e.g. 0426-NL0102G-SL" style="border:1px solid #e6e8e8;border-radius:6px;padding:2px 6px;font-size:0.75rem;min-width:150px" onkeydown="if(event.key===&apos;Enter&apos;)saveShipment(&apos;' + cn + '&apos;)" />' +
+    ' <button onclick="saveShipment(&apos;' + cn + '&apos;)" style="background:#002663;color:#fff;font-size:0.7rem;padding:3px 10px;border-radius:6px;font-weight:600">Save</button>' +
+    ' <button onclick="cancelShipmentEdit(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.7rem">Cancel</button>' +
+    '</span>';
+  document.querySelectorAll('[data-shipment="' + cn + '"]').forEach(function(el) { el.innerHTML = html; });
+  var inputs = document.querySelectorAll('.sedit-' + cn);
+  if (inputs.length) { inputs[0].focus(); inputs[0].select(); }
+}
+
+async function saveShipment(cn) {
+  var inputs = document.querySelectorAll('.sedit-' + cn);
+  var sid = inputs.length ? inputs[0].value.trim() : '';
+  var passcode = sessionStorage.getItem('passcode') || '';
+  try {
+    var res = await fetch('/api/shipment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Passcode': passcode },
+      body: JSON.stringify({ number: cn, shipmentId: sid })
+    });
+    if (res.ok) {
+      if (lastResults[cn]) lastResults[cn].shipmentId = sid || null;
+      document.querySelectorAll('[data-shipment="' + cn + '"]').forEach(function(el) {
+        el.innerHTML = shipmentCellInner(cn, sid || null);
+      });
+    } else { alert('Failed to save Shipment #. Please try again.'); }
+  } catch(e) { alert('Network error: ' + e.message); }
+}
+
+function cancelShipmentEdit(cn) {
+  var r = lastResults[cn];
+  var sid = (r && r.shipmentId) ? r.shipmentId : null;
+  document.querySelectorAll('[data-shipment="' + cn + '"]').forEach(function(el) {
+    el.innerHTML = shipmentCellInner(cn, sid);
+  });
+}
+
 // ── Receive prompt ────────────────────────────────────────────────────────────
 
 function showReceivePrompt(cn) {
@@ -630,6 +710,64 @@ async function addContainer() {
   }
 }
 
+// ── Sort helpers ──────────────────────────────────────────────────────────────
+
+function sortItems(items, col, dir) {
+  if (!col) return items;
+  return items.slice().sort(function(a, b) {
+    var av, bv;
+    if (col === 'podEtaDate' || col === 'originalEta') {
+      av = parseDMY(a[col]); bv = parseDMY(b[col]);
+      if (!av && !bv) return 0; if (!av) return 1; if (!bv) return -1;
+      return dir === 'asc' ? av - bv : bv - av;
+    }
+    if (col === 'receivedAt') {
+      av = a[col] ? new Date(a[col] + 'T00:00:00') : null;
+      bv = b[col] ? new Date(b[col] + 'T00:00:00') : null;
+      if (!av && !bv) return 0; if (!av) return 1; if (!bv) return -1;
+      return dir === 'asc' ? av - bv : bv - av;
+    }
+    if (col === 'variance') {
+      av = (a.originalEta && a.receivedAt) ? Math.round((new Date(a.receivedAt + 'T00:00:00') - parseDMY(a.originalEta)) / 86400000) : null;
+      bv = (b.originalEta && b.receivedAt) ? Math.round((new Date(b.receivedAt + 'T00:00:00') - parseDMY(b.originalEta)) / 86400000) : null;
+      if (av === null && bv === null) return 0; if (av === null) return 1; if (bv === null) return -1;
+      return dir === 'asc' ? av - bv : bv - av;
+    }
+    // string sort
+    av = (a[col] || '').toLowerCase(); bv = (b[col] || '').toLowerCase();
+    if (!av && !bv) return 0; if (!av) return 1; if (!bv) return -1;
+    if (av < bv) return dir === 'asc' ? -1 : 1;
+    if (av > bv) return dir === 'asc' ? 1 : -1;
+    return 0;
+  });
+}
+
+function updateSortIndicators(sectionName, col, dir) {
+  var cols = sectionName === 'Received'
+    ? ['containerNumber', 'shipmentId', 'originalEta', 'receivedAt', 'variance']
+    : ['containerNumber', 'shipmentId', 'status', 'currentLocation', 'podEtaDate'];
+  cols.forEach(function(c) {
+    var el = document.getElementById('sort-' + sectionName + '-' + c);
+    if (!el) return;
+    el.textContent = (c === col) ? (dir === 'asc' ? '\u2191' : '\u2193') : '\u21C5';
+    el.style.color = (c === col) ? '#262f3d' : '#c4c8cc';
+  });
+}
+
+function sortSection(sectionName, colKey) {
+  var state = sortState[sectionName];
+  if (state.col === colKey) {
+    state.dir = state.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    state.col = colKey; state.dir = 'asc';
+  }
+  if (sectionName === 'Received') {
+    renderReceivedSection(allReceived, true);
+  } else {
+    renderSection(sectionName, sectionName === 'Transit' ? allTransit : allPort, true);
+  }
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 
 function renderActiveRow(r) {
@@ -638,12 +776,13 @@ function renderActiveRow(r) {
   if (!r.success) {
     return '<tr class="border-b border-[#f0f1f2] hover:bg-[#fafafa]">' +
       '<td class="px-4 py-3 font-mono font-semibold">' + cn + '</td>' +
-      '<td class="px-4 py-3" colspan="5"><span style="color:#c4002b;font-size:0.75rem">&#9888; ' + (r.error || 'Unknown error') + '</span></td>' +
+      '<td class="px-4 py-3" colspan="6"><span style="color:#c4002b;font-size:0.75rem">&#9888; ' + (r.error || 'Unknown error') + '</span></td>' +
       '<td class="px-4 py-3">' + actionsDiv(cn, false) + '</td>' +
       '</tr>';
   }
   return '<tr class="border-b border-[#f0f1f2] hover:bg-[#fafafa] transition-colors">' +
     '<td class="px-4 py-3"><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + (r.containerType || '') + '</div></td>' +
+    '<td class="px-4 py-3">' + shipmentCell(cn, r.shipmentId) + '</td>' +
     '<td class="px-4 py-3">' + statusBadge(r) + '</td>' +
     '<td class="px-4 py-3"><div style="color:#262f3d">' + (r.currentLocation || '\u2014') + '</div><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + fmtDate(r.lastEventDate) + '</div></td>' +
     '<td class="px-4 py-3">' + (r.vessel ? '<a href="' + vesselLink(r.vesselIMO, r.vessel) + '" target="_blank" style="color:#02579a;font-size:0.875rem" class="hover:underline">' + r.vessel + '</a><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + (r.voyage || '') + '</div>' : '<span style="color:#a9adb1">\u2014</span>') + '</td>' +
@@ -665,6 +804,7 @@ function renderActiveCard(r) {
     card.innerHTML =
       '<div class="flex items-center justify-between mb-3"><div><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1">' + (r.containerType || '') + '</div></div>' + statusBadge(r) + '</div>' +
       '<div class="grid grid-cols-2 gap-y-2 mb-3" style="font-size:0.75rem">' +
+        '<span style="color:#897a6b">Shipment #</span><span>' + shipmentCell(cn, r.shipmentId) + '</span>' +
         '<span style="color:#897a6b">Location</span><span style="color:#262f3d">' + (r.currentLocation || '\u2014') + '</span>' +
         '<span style="color:#897a6b">Last event</span><span style="color:#262f3d">' + fmtDate(r.lastEventDate) + '</span>' +
         '<span style="color:#897a6b">Vessel</span><span>' + (r.vessel ? '<a href="' + vesselLink(r.vesselIMO, r.vessel) + '" target="_blank" style="color:#02579a">' + r.vessel + '</a>' : '\u2014') + '</span>' +
@@ -675,7 +815,13 @@ function renderActiveCard(r) {
   return card;
 }
 
-function renderSection(name, items) {
+function renderSection(name, items, noStore) {
+  if (!noStore) {
+    if (name === 'Transit') allTransit = items;
+    else if (name === 'Port') allPort = items;
+  }
+  var state = sortState[name];
+  var sorted = sortItems(items, state.col, state.dir);
   var sec = document.getElementById('section' + name);
   var tbody = document.getElementById('table' + name);
   var cards = document.getElementById('cards' + name);
@@ -685,12 +831,16 @@ function renderSection(name, items) {
   if (!items.length) { sec.classList.add('hidden'); return; }
   sec.classList.remove('hidden');
   var rows = '';
-  items.forEach(function(r) { rows += renderActiveRow(r); });
+  sorted.forEach(function(r) { rows += renderActiveRow(r); });
   tbody.innerHTML = rows;
-  items.forEach(function(r) { cards.appendChild(renderActiveCard(r)); });
+  sorted.forEach(function(r) { cards.appendChild(renderActiveCard(r)); });
+  updateSortIndicators(name, state.col, state.dir);
 }
 
-function renderReceivedSection(items) {
+function renderReceivedSection(items, noStore) {
+  if (!noStore) allReceived = items;
+  var state = sortState['Received'];
+  var sorted = sortItems(items, state.col, state.dir);
   var sec = document.getElementById('sectionReceived');
   var tbody = document.getElementById('tableReceived');
   var cards = document.getElementById('cardsReceived');
@@ -700,10 +850,11 @@ function renderReceivedSection(items) {
   if (!items.length) { sec.classList.add('hidden'); return; }
   sec.classList.remove('hidden');
   var rows = '';
-  items.forEach(function(r) {
+  sorted.forEach(function(r) {
     var cn = r.containerNumber;
     rows += '<tr class="border-b border-[#f0f1f2] hover:bg-[#fafafa] transition-colors">' +
       '<td class="px-4 py-3"><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">Added ' + fmtDateISO(r.addedAt) + '</div></td>' +
+      '<td class="px-4 py-3">' + shipmentCell(cn, r.shipmentId) + '</td>' +
       '<td class="px-4 py-3" style="color:#262f3d">' + fmtDate(r.originalEta) + '</td>' +
       '<td class="px-4 py-3" style="color:#262f3d">' + fmtDateISO(r.receivedAt) + '</td>' +
       '<td class="px-4 py-3">' + etaDelta(r.originalEta, r.receivedAt) + '</td>' +
@@ -714,6 +865,7 @@ function renderReceivedSection(items) {
     card.innerHTML =
       '<div class="flex items-center justify-between mb-3"><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><span style="background:#e6e8e8;color:#897a6b;padding:2px 8px;border-radius:9999px;font-size:0.7rem;font-weight:600">Received</span></div>' +
       '<div class="grid grid-cols-2 gap-y-2 mb-3" style="font-size:0.75rem">' +
+        '<span style="color:#897a6b">Shipment #</span><span>' + shipmentCell(cn, r.shipmentId) + '</span>' +
         '<span style="color:#897a6b">Original ETA</span><span>' + fmtDate(r.originalEta) + '</span>' +
         '<span style="color:#897a6b">Received</span><span>' + fmtDateISO(r.receivedAt) + '</span>' +
         '<span style="color:#897a6b">Variance</span><span>' + etaDelta(r.originalEta, r.receivedAt) + '</span>' +
@@ -722,6 +874,7 @@ function renderReceivedSection(items) {
     cards.appendChild(card);
   });
   tbody.innerHTML = rows;
+  updateSortIndicators('Received', state.col, state.dir);
 }
 
 function renderResults(results) {
@@ -760,6 +913,7 @@ function stopTimer() {
 }
 
 async function trackAll() {
+  sortState = { Transit: { col: null, dir: 'asc' }, Port: { col: null, dir: 'asc' }, Received: { col: null, dir: 'asc' } };
   var passcode = sessionStorage.getItem('passcode') || '';
   document.getElementById('loadingState').classList.remove('hidden');
   document.getElementById('resultsSection').classList.add('hidden');
@@ -874,6 +1028,7 @@ export default {
       if (request.method === 'DELETE') return handleListDelete(request, env);
     }
     if (url.pathname === '/api/receive' && request.method === 'POST') return handleReceive(request, env);
+    if (url.pathname === '/api/shipment' && request.method === 'POST') return handleShipment(request, env);
     if (url.pathname === '/robots.txt') return handleRobots();
 
     return new Response(HTML, {
