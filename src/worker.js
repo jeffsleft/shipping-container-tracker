@@ -29,6 +29,37 @@ async function saveContainers(env, list) {
   await env.TRACKER_KV.put('containers', JSON.stringify(list));
 }
 
+async function getPorts(env) {
+  const raw = await env.TRACKER_KV.get('ports');
+  if (raw) return JSON.parse(raw);
+  const defaultPorts = [
+    { id: 'USHOU', name: 'Houston, United States', country: 'US' },
+    { id: 'BSFRP', name: 'Freeport, Grand Bahama', country: 'BS' },
+    { id: 'GHTEM', name: 'Tema, Ghana', country: 'GH' },
+    { id: 'TGLFW', name: 'Lome, Togo', country: 'TG' },
+    { id: 'SLFNT', name: 'Freetown, Sierra Leone', country: 'SL' },
+    { id: 'BEANR', name: 'Antwerp, Belgium', country: 'BE' },
+    { id: 'CIABJ', name: 'Abidjan, Cote d\'Ivoire', country: 'CI' },
+    { id: 'NLRTM', name: 'Rotterdam, Netherlands', country: 'NL' },
+    { id: 'ESPLM', name: 'Las Palmas, Gran Canaria', country: 'ES' },
+  ];
+  await env.TRACKER_KV.put('ports', JSON.stringify(defaultPorts));
+  return defaultPorts;
+}
+
+async function savePorts(env, ports) {
+  await env.TRACKER_KV.put('ports', JSON.stringify(ports));
+}
+
+async function getVessels(env) {
+  const raw = await env.TRACKER_KV.get('vessels');
+  return raw ? JSON.parse(raw) : {};
+}
+
+async function saveVessels(env, vessels) {
+  await env.TRACKER_KV.put('vessels', JSON.stringify(vessels));
+}
+
 // ─── MSC Response Parser ──────────────────────────────────────────────────────
 
 function parseMSCResponse(data, requestedContainer) {
@@ -99,11 +130,27 @@ async function handleListPost(request, env) {
   if (!number) return Response.json({ error: 'Container number required' }, { status: 400 });
 
   const containers = await getContainers(env);
-  if (containers.find(function(c) { return c.number === number; })) {
-    return Response.json({ error: 'Container already in list' }, { status: 409 });
+  const existing = containers.find(function(c) { return c.number === number && !c.received; });
+  if (existing) {
+    return Response.json({
+      error: 'Container already in list',
+      existingContainer: { number: existing.number, addedAt: existing.addedAt, shipmentId: existing.shipmentId }
+    }, { status: 409 });
   }
+
   const today = new Date().toISOString().slice(0, 10);
-  containers.push({ number: number, addedAt: today, originalEta: null, received: false, receivedAt: null, shipmentId: null });
+  const vesselId = body.vesselId || null;
+  containers.push({
+    number: number,
+    addedAt: today,
+    originalEta: null,
+    received: false,
+    receivedAt: null,
+    shipmentId: null,
+    vesselId: vesselId,
+    location: 'In Transit',
+    receivedPort: null
+  });
   await saveContainers(env, containers);
   return Response.json({ success: true });
 }
@@ -129,14 +176,28 @@ async function handleReceive(request, env) {
   try { body = await request.json(); } catch(e) { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
   const number = (body.number || '').trim().toUpperCase();
   const receivedAt = body.receivedAt || new Date().toISOString().slice(0, 10);
+  const receivedPort = body.receivedPort || null;
   if (!number) return Response.json({ error: 'Container number required' }, { status: 400 });
 
   const containers = await getContainers(env);
   const c = containers.find(function(c) { return c.number === number; });
   if (!c) return Response.json({ error: 'Container not found' }, { status: 404 });
 
+  if (c.vesselId && receivedPort) {
+    const vessels = await getVessels(env);
+    const vessel = vessels[c.vesselId];
+    if (vessel && vessel.currentPort !== receivedPort) {
+      return Response.json({
+        error: 'Receive port does not match vessel current port',
+        vesselCurrentPort: vessel.currentPort,
+        attemptedPort: receivedPort
+      }, { status: 422 });
+    }
+  }
+
   c.received = true;
   c.receivedAt = receivedAt;
+  c.receivedPort = receivedPort;
   await saveContainers(env, containers);
   return Response.json({ success: true });
 }
@@ -160,6 +221,90 @@ async function handleShipment(request, env) {
   return Response.json({ success: true });
 }
 
+// ─── Route: PUT /api/list (update container location/vessel) ───────────────────────────────────────────────
+
+async function handleListPut(request, env) {
+  if (!checkPasscode(request, env)) return unauthorized();
+  let body;
+  try { body = await request.json(); } catch(e) { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
+  const number = (body.number || '').trim().toUpperCase();
+  if (!number) return Response.json({ error: 'Container number required' }, { status: 400 });
+  const containers = await getContainers(env);
+  const c = containers.find(function(c) { return c.number === number; });
+  if (!c) return Response.json({ error: 'Container not found' }, { status: 404 });
+
+  const location = (body.location || c.location || 'In Transit');
+  const vesselId = body.vesselId || c.vesselId || null;
+  const portId = body.portId || null;
+
+  if (location === 'In Port' && vesselId && portId) {
+    const vessels = await getVessels(env);
+    const vessel = vessels[vesselId];
+    if (vessel && vessel.currentPort !== portId) {
+      return Response.json({ error: 'Location port does not match vessel current port', vesselCurrentPort: vessel.currentPort, attemptedPort: portId }, { status: 422 });
+    }
+  }
+
+  c.location = location;
+  c.vesselId = vesselId;
+  await saveContainers(env, containers);
+  return Response.json({ success: true, container: c });
+}
+
+// ─── Route: GET/POST /api/ports ───────────────────────────────────────────────
+
+async function handlePorts(request, env) {
+  if (!checkPasscode(request, env)) return unauthorized();
+  if (request.method === 'GET') {
+    const ports = await getPorts(env);
+    return Response.json(ports);
+  }
+  if (request.method === 'POST') {
+    let body;
+    try { body = await request.json(); } catch(e) { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
+    const id = (body.id || '').trim().toUpperCase();
+    const name = (body.name || '').trim();
+    const country = (body.country || '').trim();
+    if (!id || !name) return Response.json({ error: 'Port id and name required' }, { status: 400 });
+
+    const ports = await getPorts(env);
+    if (ports.find(function(p) { return p.id === id; })) {
+      return Response.json({ error: 'Port already exists' }, { status: 409 });
+    }
+    ports.push({ id: id, name: name, country: country });
+    await savePorts(env, ports);
+    return Response.json({ success: true, port: { id: id, name: name, country: country } });
+  }
+  return Response.json({ error: 'Method not allowed' }, { status: 405 });
+}
+
+// ─── Route: POST /api/vessel ──────────────────────────────────────────────────
+
+async function handleVessel(request, env) {
+  if (!checkPasscode(request, env)) return unauthorized();
+  if (request.method === 'POST') {
+    let body;
+    try { body = await request.json(); } catch(e) { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
+    const vesselId = (body.vesselId || '').trim();
+    const currentPort = (body.currentPort || '').trim();
+    if (!vesselId) return Response.json({ error: 'Vessel ID required' }, { status: 400 });
+
+    const vessels = await getVessels(env);
+    vessels[vesselId] = vessels[vesselId] || {};
+    vessels[vesselId].vesselId = vesselId;
+    vessels[vesselId].vesselName = body.vesselName || vesselId;
+    if (currentPort) vessels[vesselId].currentPort = currentPort;
+    if (body.portsOfCall) vessels[vesselId].portsOfCall = body.portsOfCall;
+    await saveVessels(env, vessels);
+    return Response.json({ success: true, vessel: vessels[vesselId] });
+  }
+  if (request.method === 'GET') {
+    const vessels = await getVessels(env);
+    return Response.json(vessels);
+  }
+  return Response.json({ error: 'Method not allowed' }, { status: 405 });
+}
+
 // ─── Route: GET /api/track ────────────────────────────────────────────────────
 
 async function handleTrackRequest(request, env) {
@@ -174,6 +319,7 @@ async function handleTrackRequest(request, env) {
       success: true, containerNumber: c.number, received: true,
       receivedAt: c.receivedAt, originalEta: c.originalEta, addedAt: c.addedAt, status: 'Received',
       shipmentId: c.shipmentId || null,
+      receivedPort: c.receivedPort || null,
     };
   });
 
@@ -219,6 +365,8 @@ async function handleTrackRequest(request, env) {
       originalEta: kvEntry ? kvEntry.originalEta : null,
       addedAt: kvEntry ? kvEntry.addedAt : null,
       shipmentId: kvEntry ? (kvEntry.shipmentId || null) : null,
+      vesselId: kvEntry ? (kvEntry.vesselId || null) : null,
+      location: kvEntry ? (kvEntry.location || 'In Transit') : 'In Transit',
     });
   });
 
@@ -306,17 +454,27 @@ const HTML = `<!DOCTYPE html>
   <!-- Add Container -->
   <div class="bg-white rounded-2xl shadow-sm border border-[#e6e8e8] p-5">
     <h2 class="text-sm font-semibold text-[#262f3d] mb-3">Add Container</h2>
-    <div class="flex gap-3">
-      <input type="text" id="newContainerInput"
-        placeholder="e.g. MSDU6574161"
-        style="text-transform:uppercase"
-        class="flex-1 border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#002663] placeholder-[#a9adb1]"
-        onkeydown="if(event.key==='Enter')addContainer()"
-      />
-      <button onclick="addContainer()"
-        class="bg-[#002663] hover:bg-[#02579a] active:bg-[#001a47] text-white font-semibold px-5 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
-        + Add
-      </button>
+    <div class="space-y-3">
+      <div class="flex gap-3">
+        <input type="text" id="newContainerInput"
+          placeholder="e.g. MSDU6574161"
+          style="text-transform:uppercase"
+          class="flex-1 border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#002663] placeholder-[#a9adb1]"
+          onkeydown="if(event.key==='Enter')addContainer()"
+        />
+        <button onclick="addContainer()"
+          class="bg-[#002663] hover:bg-[#02579a] active:bg-[#001a47] text-white font-semibold px-5 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
+          + Add
+        </button>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <select id="vesselSelect" class="border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002663]">
+          <option value="">Select Vessel (optional)</option>
+        </select>
+        <select id="portSelect" class="border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002663]">
+          <option value="">Select Port (optional)</option>
+        </select>
+      </div>
     </div>
     <div id="addMsg" class="hidden text-xs mt-2"></div>
   </div>
@@ -426,6 +584,7 @@ const HTML = `<!DOCTYPE html>
                 <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;shipmentId&apos;)">Shipment # <span id="sort-Received-shipmentId" style="color:#c4c8cc">&#8645;</span></th>
                 <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;originalEta&apos;)">Original ETA <span id="sort-Received-originalEta" style="color:#c4c8cc">&#8645;</span></th>
                 <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;receivedAt&apos;)">Date Received <span id="sort-Received-receivedAt" style="color:#c4c8cc">&#8645;</span></th>
+                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]">Port Received</th>
                 <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;variance&apos;)">Variance <span id="sort-Received-variance" style="color:#c4c8cc">&#8645;</span></th>
                 <th class="px-4 py-3"></th>
               </tr>
@@ -445,6 +604,28 @@ const HTML = `<!DOCTYPE html>
 
   </div>
 </main>
+</div>
+
+<!-- Duplicate Container Modal -->
+<div id="duplicateModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
+  <div class="bg-white rounded-2xl shadow-xl max-w-sm w-full">
+    <div class="px-5 py-4 border-b border-[#e6e8e8]">
+      <h3 class="font-semibold text-[#262f3d]">Container Already Exists</h3>
+    </div>
+    <div class="p-5 space-y-3 text-sm">
+      <p class="text-[#262f3d]">This container has already been added and is not yet received.</p>
+      <div class="bg-[#f7f7f7] rounded-lg p-3 space-y-1 text-xs">
+        <div><span class="text-[#897a6b]">Container:</span> <span id="dupContainerNum" class="font-mono font-semibold"></span></div>
+        <div><span class="text-[#897a6b]">Added:</span> <span id="dupAddedAt"></span></div>
+        <div><span class="text-[#897a6b]">Shipment:</span> <span id="dupShipmentId"></span></div>
+      </div>
+    </div>
+    <div class="px-5 py-3 border-t border-[#e6e8e8] flex justify-end">
+      <button onclick="closeDuplicateModal()" class="bg-[#002663] hover:bg-[#02579a] text-white font-semibold px-4 py-2 rounded-lg text-sm">
+        OK
+      </button>
+    </div>
+  </div>
 </div>
 
 <!-- History Modal -->
@@ -689,17 +870,20 @@ async function addContainer() {
   var msg = document.getElementById('addMsg');
   if (!cn) return;
   var passcode = sessionStorage.getItem('passcode') || '';
+  var vesselId = document.getElementById('vesselSelect').value || null;
   try {
     var res = await fetch('/api/list', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Passcode': passcode },
-      body: JSON.stringify({ number: cn })
+      body: JSON.stringify({ number: cn, vesselId: vesselId })
     });
     var data = await res.json();
     if (res.ok) {
       input.value = '';
       msg.className = 'hidden';
       trackAll();
+    } else if (res.status === 409 && data.existingContainer) {
+      showDuplicateModal(data.existingContainer);
     } else {
       msg.textContent = data.error || 'Failed to add container.';
       msg.className = 'text-[#c4002b] text-xs mt-2';
@@ -708,6 +892,17 @@ async function addContainer() {
     msg.textContent = 'Network error: ' + e.message;
     msg.className = 'text-[#c4002b] text-xs mt-2';
   }
+}
+
+function showDuplicateModal(container) {
+  document.getElementById('dupContainerNum').textContent = container.number || 'Unknown';
+  document.getElementById('dupAddedAt').textContent = container.addedAt || '—';
+  document.getElementById('dupShipmentId').textContent = container.shipmentId || '—';
+  document.getElementById('duplicateModal').classList.remove('hidden');
+}
+
+function closeDuplicateModal() {
+  document.getElementById('duplicateModal').classList.add('hidden');
 }
 
 // ── Sort helpers ──────────────────────────────────────────────────────────────
@@ -857,6 +1052,7 @@ function renderReceivedSection(items, noStore) {
       '<td class="px-4 py-3">' + shipmentCell(cn, r.shipmentId) + '</td>' +
       '<td class="px-4 py-3" style="color:#262f3d">' + fmtDate(r.originalEta) + '</td>' +
       '<td class="px-4 py-3" style="color:#262f3d">' + fmtDateISO(r.receivedAt) + '</td>' +
+      '<td class="px-4 py-3" style="color:#262f3d">' + (r.receivedPort || '\u2014') + '</td>' +
       '<td class="px-4 py-3">' + etaDelta(r.originalEta, r.receivedAt) + '</td>' +
       '<td class="px-4 py-3">' + actionsDiv(cn, true) + '</td>' +
       '</tr>';
@@ -868,6 +1064,7 @@ function renderReceivedSection(items, noStore) {
         '<span style="color:#897a6b">Shipment #</span><span>' + shipmentCell(cn, r.shipmentId) + '</span>' +
         '<span style="color:#897a6b">Original ETA</span><span>' + fmtDate(r.originalEta) + '</span>' +
         '<span style="color:#897a6b">Received</span><span>' + fmtDateISO(r.receivedAt) + '</span>' +
+        '<span style="color:#897a6b">Port Received</span><span>' + (r.receivedPort || '\u2014') + '</span>' +
         '<span style="color:#897a6b">Variance</span><span>' + etaDelta(r.originalEta, r.receivedAt) + '</span>' +
       '</div>' +
       '<div class="pt-3" style="border-top:1px solid #f0f1f2">' + actionsDiv(cn, true) + '</div>';
@@ -1003,7 +1200,45 @@ async function submitPasscode() {
 function initApp() {
   document.getElementById('passcodeGate').classList.add('hidden');
   document.getElementById('mainApp').classList.remove('hidden');
+  loadPortsAndVessels();
   trackAll();
+}
+
+async function loadPortsAndVessels() {
+  var passcode = sessionStorage.getItem('passcode') || '';
+  try {
+    var portsRes = await fetch('/api/ports', {
+      headers: { 'X-Passcode': passcode }
+    });
+    if (portsRes.ok) {
+      var ports = await portsRes.json();
+      var portSelect = document.getElementById('portSelect');
+      portSelect.innerHTML = '<option value="">Select Port (optional)</option>';
+      ports.forEach(function(p) {
+        var opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name + (p.country ? ' (' + p.country + ')' : '');
+        portSelect.appendChild(opt);
+      });
+    }
+    var vesselRes = await fetch('/api/vessel', {
+      headers: { 'X-Passcode': passcode }
+    });
+    if (vesselRes.ok) {
+      var vessels = await vesselRes.json();
+      var vesselSelect = document.getElementById('vesselSelect');
+      vesselSelect.innerHTML = '<option value="">Select Vessel (optional)</option>';
+      Object.keys(vessels).forEach(function(vid) {
+        var v = vessels[vid];
+        var opt = document.createElement('option');
+        opt.value = vid;
+        opt.textContent = v.vesselName || vid;
+        vesselSelect.appendChild(opt);
+      });
+    }
+  } catch(e) {
+    console.error('Failed to load ports/vessels:', e);
+  }
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -1026,9 +1261,12 @@ export default {
       if (request.method === 'GET') return handleListGet(request, env);
       if (request.method === 'POST') return handleListPost(request, env);
       if (request.method === 'DELETE') return handleListDelete(request, env);
+      if (request.method === 'PUT') return handleListPut(request, env);
     }
     if (url.pathname === '/api/receive' && request.method === 'POST') return handleReceive(request, env);
     if (url.pathname === '/api/shipment' && request.method === 'POST') return handleShipment(request, env);
+    if (url.pathname === '/api/ports') return handlePorts(request, env);
+    if (url.pathname === '/api/vessel') return handleVessel(request, env);
     if (url.pathname === '/robots.txt') return handleRobots();
 
     return new Response(HTML, {
