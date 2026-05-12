@@ -42,6 +42,7 @@ async function getPorts(env) {
     { id: 'CIABJ', name: 'Abidjan, Cote d\'Ivoire', country: 'CI' },
     { id: 'NLRTM', name: 'Rotterdam, Netherlands', country: 'NL' },
     { id: 'ESPLM', name: 'Las Palmas, Gran Canaria', country: 'ES' },
+    { id: 'SNDAK', name: 'Dakar, Senegal', country: 'SN' },
   ];
   await env.TRACKER_KV.put('ports', JSON.stringify(defaultPorts));
   return defaultPorts;
@@ -479,7 +480,18 @@ const HTML = `<!DOCTYPE html>
     <div id="addMsg" class="hidden text-xs mt-2"></div>
   </div>
 
+  <!-- Tabs -->
+  <div class="flex gap-1 border-b border-[#e6e8e8]">
+    <button onclick="switchTab('tracker')" id="tabTracker" class="px-4 py-2 text-sm font-semibold text-[#002663] border-b-2 border-[#002663]">
+      Tracker
+    </button>
+    <button onclick="switchTab('manage')" id="tabManage" class="px-4 py-2 text-sm font-semibold text-[#a9adb1] border-b-2 border-transparent hover:text-[#262f3d]">
+      Manage Ports & Vessels
+    </button>
+  </div>
+
   <!-- Summary -->
+  <div id="trackerView">
   <div id="summaryBar" class="hidden grid grid-cols-3 gap-3 fade-in">
     <div class="bg-white rounded-xl border border-[#d5e4f0] p-3 text-center shadow-sm">
       <div id="sumTransit" class="text-2xl font-bold text-[#02579a]">0</div>
@@ -603,6 +615,48 @@ const HTML = `<!DOCTYPE html>
     </div>
 
   </div>
+  </div>
+
+  <!-- Management View -->
+  <div id="manageView" class="hidden space-y-5">
+    
+    <!-- Manage Ports -->
+    <div class="bg-white rounded-2xl shadow-sm border border-[#e6e8e8] p-5">
+      <h2 class="text-sm font-semibold text-[#262f3d] mb-4">Ports of Call</h2>
+      <div class="flex gap-3 mb-4">
+        <input type="text" id="newPortName" placeholder="Port name (e.g., Port Said, Egypt)" 
+          class="flex-1 border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002663]" />
+        <input type="text" id="newPortCountry" placeholder="Country code (e.g., EG)" style="text-transform:uppercase; max-width:80px"
+          class="border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002663]" />
+        <button onclick="addPort()" class="bg-[#002663] hover:bg-[#02579a] text-white font-semibold px-5 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
+          + Add Port
+        </button>
+      </div>
+      <div id="portsList" class="space-y-2"></div>
+      <div id="portsMsg" class="hidden text-xs mt-3"></div>
+    </div>
+
+    <!-- Manage Vessels -->
+    <div class="bg-white rounded-2xl shadow-sm border border-[#e6e8e8] p-5">
+      <h2 class="text-sm font-semibold text-[#262f3d] mb-4">Vessels</h2>
+      <div class="space-y-3 mb-4">
+        <input type="text" id="newVesselId" placeholder="Vessel ID (e.g., MSC-GULSUN)" style="text-transform:uppercase"
+          class="w-full border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#002663]" />
+        <input type="text" id="newVesselName" placeholder="Vessel Name (e.g., MSC Gulsun)"
+          class="w-full border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002663]" />
+        <select id="newVesselCurrentPort" class="w-full border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002663]">
+          <option value="">Select Current Port</option>
+        </select>
+        <button onclick="addVessel()" class="w-full bg-[#002663] hover:bg-[#02579a] text-white font-semibold px-5 py-2 rounded-lg text-sm transition-colors">
+          + Add Vessel
+        </button>
+      </div>
+      <div id="vesselsList" class="space-y-2"></div>
+      <div id="vesselsMsg" class="hidden text-xs mt-3"></div>
+    </div>
+
+  </div>
+
 </main>
 </div>
 
@@ -1239,6 +1293,197 @@ async function loadPortsAndVessels() {
   } catch(e) {
     console.error('Failed to load ports/vessels:', e);
   }
+}
+
+// ── Tab & Management UI ───────────────────────────────────────────────────────
+
+function switchTab(tab) {
+  var isTracker = tab === 'tracker';
+  document.getElementById('trackerView').classList[isTracker ? 'remove' : 'add']('hidden');
+  document.getElementById('manageView').classList[isTracker ? 'add' : 'remove']('hidden');
+  
+  var tabTracker = document.getElementById('tabTracker');
+  var tabManage = document.getElementById('tabManage');
+  
+  if (isTracker) {
+    tabTracker.classList.add('border-[#002663]');
+    tabTracker.classList.add('text-[#002663]');
+    tabTracker.classList.remove('border-transparent');
+    tabTracker.classList.remove('text-[#a9adb1]');
+    tabManage.classList.remove('border-[#002663]');
+    tabManage.classList.remove('text-[#002663]');
+    tabManage.classList.add('border-transparent');
+    tabManage.classList.add('text-[#a9adb1]');
+  } else {
+    tabTracker.classList.remove('border-[#002663]');
+    tabTracker.classList.remove('text-[#002663]');
+    tabTracker.classList.add('border-transparent');
+    tabTracker.classList.add('text-[#a9adb1]');
+    tabManage.classList.add('border-[#002663]');
+    tabManage.classList.add('text-[#002663]');
+    tabManage.classList.remove('border-transparent');
+    tabManage.classList.remove('text-[#a9adb1]');
+    refreshManagementUI();
+  }
+}
+
+async function refreshManagementUI() {
+  var passcode = sessionStorage.getItem('passcode') || '';
+  try {
+    var portsRes = await fetch('/api/ports', { headers: { 'X-Passcode': passcode } });
+    if (portsRes.ok) {
+      var ports = await portsRes.json();
+      var html = '<div class="space-y-2">';
+      ports.forEach(function(p) {
+        html += '<div class="flex items-center justify-between bg-[#f7f7f7] rounded-lg p-3">' +
+          '<div><div class="font-semibold text-[#262f3d]">' + p.name + '</div><div class="text-xs text-[#a9adb1]">' + p.id + ' · ' + p.country + '</div></div>' +
+          '<button onclick="deletePort(\'' + p.id + '\')" class="text-[#c4002b] hover:text-[#a00020] text-xs font-semibold">Remove</button>' +
+          '</div>';
+      });
+      html += '</div>';
+      document.getElementById('portsList').innerHTML = html;
+    }
+    var vesselRes = await fetch('/api/vessel', { headers: { 'X-Passcode': passcode } });
+    if (vesselRes.ok) {
+      var vessels = await vesselRes.json();
+      var html = '<div class="space-y-2">';
+      Object.keys(vessels).forEach(function(vid) {
+        var v = vessels[vid];
+        html += '<div class="flex items-center justify-between bg-[#f7f7f7] rounded-lg p-3">' +
+          '<div><div class="font-semibold text-[#262f3d]">' + (v.vesselName || vid) + '</div><div class="text-xs text-[#a9adb1]">ID: ' + vid + ' · Current Port: ' + (v.currentPort || 'None') + '</div></div>' +
+          '<button onclick="deleteVessel(\'' + vid + '\')" class="text-[#c4002b] hover:text-[#a00020] text-xs font-semibold">Remove</button>' +
+          '</div>';
+      });
+      html += '</div>';
+      document.getElementById('vesselsList').innerHTML = html;
+      
+      var newVesselPortSelect = document.getElementById('newVesselCurrentPort');
+      newVesselPortSelect.innerHTML = '<option value="">Select Current Port</option>';
+      var portSelect = document.getElementById('portSelect');
+      for (var i = 1; i < portSelect.options.length; i++) {
+        var opt = portSelect.options[i];
+        var newOpt = document.createElement('option');
+        newOpt.value = opt.value;
+        newOpt.textContent = opt.textContent;
+        newVesselPortSelect.appendChild(newOpt);
+      }
+    }
+  } catch(e) {
+    console.error('Failed to refresh management UI:', e);
+  }
+}
+
+async function addPort() {
+  var name = (document.getElementById('newPortName').value || '').trim();
+  var country = (document.getElementById('newPortCountry').value || '').trim().toUpperCase();
+  if (!name || !country) {
+    showMsg('portsMsg', 'Please enter port name and country code', 'error');
+    return;
+  }
+  var portId = country + name.substring(0, 3).toUpperCase().replace(/\s/g, '');
+  var passcode = sessionStorage.getItem('passcode') || '';
+  try {
+    var res = await fetch('/api/ports', {
+      method: 'POST',
+      headers: { 'X-Passcode': passcode, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: portId, name: name, country: country })
+    });
+    if (res.ok) {
+      document.getElementById('newPortName').value = '';
+      document.getElementById('newPortCountry').value = '';
+      showMsg('portsMsg', 'Port added successfully', 'success');
+      loadPortsAndVessels();
+      refreshManagementUI();
+    } else {
+      var err = await res.json();
+      showMsg('portsMsg', err.error || 'Failed to add port', 'error');
+    }
+  } catch(e) {
+    showMsg('portsMsg', 'Network error: ' + e.message, 'error');
+  }
+}
+
+async function deletePort(portId) {
+  if (!confirm('Remove this port?')) return;
+  var passcode = sessionStorage.getItem('passcode') || '';
+  try {
+    var ports = [];
+    var portsRes = await fetch('/api/ports', { headers: { 'X-Passcode': passcode } });
+    if (portsRes.ok) ports = await portsRes.json();
+    ports = ports.filter(function(p) { return p.id !== portId; });
+    var res = await fetch('/api/ports', {
+      method: 'POST',
+      headers: { 'X-Passcode': passcode, 'Content-Type': 'application/json' },
+      body: JSON.stringify(ports)
+    });
+    if (res.ok) {
+      loadPortsAndVessels();
+      refreshManagementUI();
+    }
+  } catch(e) {
+    console.error('Failed to delete port:', e);
+  }
+}
+
+async function addVessel() {
+  var vesselId = (document.getElementById('newVesselId').value || '').trim().toUpperCase();
+  var vesselName = (document.getElementById('newVesselName').value || '').trim();
+  var currentPort = (document.getElementById('newVesselCurrentPort').value || '').trim();
+  if (!vesselId) {
+    showMsg('vesselsMsg', 'Please enter vessel ID', 'error');
+    return;
+  }
+  var passcode = sessionStorage.getItem('passcode') || '';
+  try {
+    var res = await fetch('/api/vessel', {
+      method: 'POST',
+      headers: { 'X-Passcode': passcode, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vesselId: vesselId, vesselName: vesselName || vesselId, currentPort: currentPort || null })
+    });
+    if (res.ok) {
+      document.getElementById('newVesselId').value = '';
+      document.getElementById('newVesselName').value = '';
+      document.getElementById('newVesselCurrentPort').value = '';
+      showMsg('vesselsMsg', 'Vessel added successfully', 'success');
+      loadPortsAndVessels();
+      refreshManagementUI();
+    } else {
+      var err = await res.json();
+      showMsg('vesselsMsg', err.error || 'Failed to add vessel', 'error');
+    }
+  } catch(e) {
+    showMsg('vesselsMsg', 'Network error: ' + e.message, 'error');
+  }
+}
+
+async function deleteVessel(vesselId) {
+  if (!confirm('Remove this vessel?')) return;
+  var passcode = sessionStorage.getItem('passcode') || '';
+  try {
+    var vessels = {};
+    var vesselRes = await fetch('/api/vessel', { headers: { 'X-Passcode': passcode } });
+    if (vesselRes.ok) vessels = await vesselRes.json();
+    delete vessels[vesselId];
+    var res = await fetch('/api/vessel', {
+      method: 'POST',
+      headers: { 'X-Passcode': passcode, 'Content-Type': 'application/json' },
+      body: JSON.stringify(vessels)
+    });
+    if (res.ok) {
+      loadPortsAndVessels();
+      refreshManagementUI();
+    }
+  } catch(e) {
+    console.error('Failed to delete vessel:', e);
+  }
+}
+
+function showMsg(elementId, msg, type) {
+  var el = document.getElementById(elementId);
+  el.textContent = msg;
+  el.className = 'text-xs mt-3 ' + (type === 'error' ? 'text-[#c4002b]' : 'text-[#00695b]');
+  el.classList.remove('hidden');
+  setTimeout(function() { el.classList.add('hidden'); }, 4000);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
