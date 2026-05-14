@@ -10,7 +10,7 @@ import modal
 
 app = modal.App("msc-tracker")
 
-image = modal.Image.debian_slim().pip_install("curl_cffi", "fastapi[standard]")
+image = modal.Image.debian_slim().pip_install("curl_cffi>=0.15.0", "fastapi[standard]")
 
 MSC_HOMEPAGE = "https://www.msc.com/en/track-a-shipment"
 MSC_API = "https://www.msc.com/api/feature/tools/TrackingInfo"
