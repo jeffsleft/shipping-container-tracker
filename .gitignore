@@ -25,3 +25,8 @@ design-schematics/
 # Environment & secrets
 .env
 .env.local
+
+# Session-internal handoff / planning docs (not for public repo)
+HANDOFF.md
+IMPLEMENTATION_SUMMARY.md
+features.json
