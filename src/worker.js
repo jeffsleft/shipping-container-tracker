@@ -1370,8 +1370,8 @@ async function refreshManagementUI() {
             '<div class="text-xs ' + (isCurrent ? 'text-[#4fc2f8]' : 'text-[#a9adb1]') + '">' + p.id + ' · ' + p.country + '</div>' +
           '</div>' +
           '<div class="flex items-center gap-2">' +
-            (!isCurrent ? '<button onclick="setCurrentPort(\'' + p.id + '\')" class="text-[#02579a] hover:text-[#002663] text-xs font-semibold">Set Current</button>' : '') +
-            '<button onclick="deletePort(\'' + p.id + '\')" class="' + (isCurrent ? 'text-[#4fc2f8]' : 'text-[#c4002b]') + ' hover:opacity-75 text-xs font-semibold">Remove</button>' +
+            (!isCurrent ? '<button onclick="setCurrentPort(&apos;' + p.id + '&apos;)" class="text-[#02579a] hover:text-[#002663] text-xs font-semibold">Set Current</button>' : '') +
+            '<button onclick="deletePort(&apos;' + p.id + '&apos;)" class="' + (isCurrent ? 'text-[#4fc2f8]' : 'text-[#c4002b]') + ' hover:opacity-75 text-xs font-semibold">Remove</button>' +
           '</div>' +
           '</div>';
       });
