@@ -1,5 +1,5 @@
 /**
- * Mercy Ships Container Tracker
+ * Shipping Container Tracker
  * Cloudflare Worker — serves HTML frontend and proxies to Modal.com MSC tracker
  *
  * Storage: Cloudflare KV (TRACKER_KV binding) — shared container list for all users
@@ -91,6 +91,31 @@ function parseMSCResponse(data, requestedContainer) {
     return !desc.includes('estimated') && !desc.includes('intended');
   }) || latest;
 
+  // Find a real (non-estimated) event date at a given port, matched by keyword.
+  // pickLast=true returns the earliest match (origin load); false returns the latest (POD discharge).
+  function eventDateAt(portStr, keywords, pickLast) {
+    if (!portStr) return '';
+    const portKey = portStr.split(',')[0].trim().toLowerCase();
+    if (!portKey) return '';
+    const matches = events.filter(function(e) {
+      const loc = (e.Location || '').toLowerCase();
+      const desc = (e.Description || '').toLowerCase();
+      if (desc.includes('estimated') || desc.includes('intended')) return false;
+      if (loc.indexOf(portKey) === -1) return false;
+      return keywords.some(function(k) { return desc.indexOf(k) !== -1; });
+    });
+    if (!matches.length) return '';
+    return (pickLast ? matches[matches.length - 1] : matches[0]).Date || '';
+  }
+
+  const portOfLoad = gi.PortOfLoad || gi.ShippedFrom || '';
+  const portOfDischarge = gi.PortOfDischarge || gi.ShippedTo || '';
+  const loadKey = portOfLoad.toLowerCase();
+  const originPort = loadKey.includes('houston') ? 'Houston'
+    : (loadKey.includes('rotterdam') ? 'Rotterdam' : (portOfLoad.split(',')[0].trim() || ''));
+  const loadedDate = eventDateAt(portOfLoad, ['load', 'depart', 'sail'], true);
+  const dischargedDate = eventDateAt(portOfDischarge, ['discharg', 'import'], false);
+
   return {
     success: true,
     containerNumber: ci.ContainerNumber || requestedContainer,
@@ -105,8 +130,12 @@ function parseMSCResponse(data, requestedContainer) {
     vessel: (latest.Detail && latest.Detail[0]) || '',
     voyage: (latest.Detail && latest.Detail[1]) || '',
     vesselIMO: (latest.Vessel && latest.Vessel.IMO) || '',
-    portOfLoad: gi.PortOfLoad || gi.ShippedFrom || '',
-    portOfDischarge: gi.PortOfDischarge || gi.ShippedTo || '',
+    portOfLoad: portOfLoad,
+    portOfDischarge: portOfDischarge,
+    originPort: originPort,
+    destPort: portOfDischarge.split(',')[0].trim(),
+    loadedDate: loadedDate,
+    dischargedDate: dischargedDate,
     transshipments: gi.Transshipments || [],
     podEtaDate: ci.PodEtaDate || gi.FinalPodEtaDate || '',
     eventHistory: events.slice(0, 8).map(function(e) {
@@ -136,33 +165,32 @@ async function handleListPost(request, env) {
   if (!checkPasscode(request, env)) return unauthorized();
   let body;
   try { body = await request.json(); } catch(e) { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
-  const number = (body.number || '').trim().toUpperCase();
-  if (!number) return Response.json({ error: 'Container number required' }, { status: 400 });
+
+  // Parse comma-separated input — prevents multi-number strings from being stored as one entry
+  const numbers = (body.number || '').split(',').map(function(n) { return n.trim().toUpperCase(); }).filter(Boolean);
+  if (!numbers.length) return Response.json({ error: 'Container number required' }, { status: 400 });
 
   const containers = await getContainers(env);
-  const existing = containers.find(function(c) { return c.number === number && !c.received; });
-  if (existing) {
-    return Response.json({
-      error: 'Container already in list',
-      existingContainer: { number: existing.number, addedAt: existing.addedAt, shipmentId: existing.shipmentId }
-    }, { status: 409 });
-  }
-
   const today = new Date().toISOString().slice(0, 10);
   const vesselId = body.vesselId || null;
-  containers.push({
-    number: number,
-    addedAt: today,
-    originalEta: null,
-    received: false,
-    receivedAt: null,
-    shipmentId: null,
-    vesselId: vesselId,
-    location: 'In Transit',
-    receivedPort: null
+  const added = [], duplicates = [];
+
+  numbers.forEach(function(number) {
+    const existing = containers.find(function(c) { return c.number === number && !c.received; });
+    if (existing) {
+      duplicates.push({ number: existing.number, addedAt: existing.addedAt, shipmentId: existing.shipmentId });
+    } else {
+      containers.push({ number: number, addedAt: today, originalEta: null, received: false, receivedAt: null, shipmentId: null, vesselId: vesselId, location: 'In Transit', receivedPort: null });
+      added.push(number);
+    }
   });
-  await saveContainers(env, containers);
-  return Response.json({ success: true });
+
+  if (added.length === 0 && duplicates.length === 1) {
+    return Response.json({ error: 'Container already in list', existingContainer: duplicates[0] }, { status: 409 });
+  }
+
+  if (added.length > 0) await saveContainers(env, containers);
+  return Response.json({ success: true, added: added, duplicates: duplicates });
 }
 
 // ─── Route: DELETE /api/list ──────────────────────────────────────────────────
@@ -190,8 +218,8 @@ async function handleReceive(request, env) {
   if (!number) return Response.json({ error: 'Container number required' }, { status: 400 });
 
   const containers = await getContainers(env);
-  const c = containers.find(function(c) { return c.number === number; });
-  if (!c) return Response.json({ error: 'Container not found' }, { status: 404 });
+  const c = containers.find(function(c) { return c.number && c.number.trim().toUpperCase() === number; });
+  if (!c) return Response.json({ error: 'Container not found in tracker list: ' + number }, { status: 404 });
 
   if (c.vesselId && receivedPort) {
     const vessels = await getVessels(env);
@@ -355,6 +383,10 @@ async function handleTrackRequest(request, env) {
       receivedAt: c.receivedAt, originalEta: c.originalEta, addedAt: c.addedAt, status: 'Received',
       shipmentId: c.shipmentId || null,
       receivedPort: c.receivedPort || null,
+      originPort: c.originPort || null,
+      destPort: c.destPort || null,
+      loadedAt: c.loadedAt || null,
+      dischargedAt: c.dischargedAt || null,
     };
   });
 
@@ -393,6 +425,13 @@ async function handleTrackRequest(request, env) {
       kvEntry.originalEta = parsed.podEtaDate;
       needsKvUpdate = true;
     }
+    // Capture-once: origin, load date, and discharge date persist before the box is received.
+    if (kvEntry) {
+      if (!kvEntry.originPort && parsed.originPort) { kvEntry.originPort = parsed.originPort; needsKvUpdate = true; }
+      if (!kvEntry.destPort && parsed.destPort) { kvEntry.destPort = parsed.destPort; needsKvUpdate = true; }
+      if (!kvEntry.loadedAt && parsed.loadedDate) { kvEntry.loadedAt = parsed.loadedDate; needsKvUpdate = true; }
+      if (!kvEntry.dischargedAt && parsed.dischargedDate) { kvEntry.dischargedAt = parsed.dischargedDate; needsKvUpdate = true; }
+    }
 
     return Object.assign({}, parsed, {
       containerNumber: item.containerNumber,
@@ -402,6 +441,10 @@ async function handleTrackRequest(request, env) {
       shipmentId: kvEntry ? (kvEntry.shipmentId || null) : null,
       vesselId: kvEntry ? (kvEntry.vesselId || null) : null,
       location: kvEntry ? (kvEntry.location || 'In Transit') : 'In Transit',
+      originPort: kvEntry ? (kvEntry.originPort || parsed.originPort || null) : (parsed.originPort || null),
+      destPort: kvEntry ? (kvEntry.destPort || parsed.destPort || null) : (parsed.destPort || null),
+      loadedAt: kvEntry ? (kvEntry.loadedAt || parsed.loadedDate || null) : (parsed.loadedDate || null),
+      dischargedAt: kvEntry ? (kvEntry.dischargedAt || parsed.dischargedDate || null) : (parsed.dischargedDate || null),
     });
   });
 
@@ -412,6 +455,18 @@ async function handleTrackRequest(request, env) {
   return Response.json(activeResults.concat(receivedResults), {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
   });
+}
+
+// ─── Route: GET /api/debug ────────────────────────────────────────────────────
+
+async function handleDebug(request, env) {
+  if (!checkPasscode(request, env)) return unauthorized();
+  const raw = await env.TRACKER_KV.get('containers');
+  const containers = raw ? JSON.parse(raw) : [];
+  const summary = containers.map(function(c, i) {
+    return { index: i, number: c.number, received: c.received, addedAt: c.addedAt, allKeys: Object.keys(c) };
+  });
+  return Response.json({ count: containers.length, containers: summary });
 }
 
 // ─── Route: /robots.txt ───────────────────────────────────────────────────────
@@ -430,7 +485,7 @@ const HTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
-<title>Mercy Ships Container Tracker</title>
+<title>Shipping Container Tracker</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Open+Sans:wght@300;400;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
@@ -445,20 +500,20 @@ const HTML = `<!DOCTYPE html>
 <body class="bg-[#f2f3f4] min-h-screen text-[#262f3d]">
 
 <!-- Passcode Gate -->
-<div id="passcodeGate" class="fixed inset-0 bg-[#002663] z-50 flex items-center justify-center p-4">
+<div id="passcodeGate" class="fixed inset-0 bg-[#1e293b] z-50 flex items-center justify-center p-4">
   <div class="bg-white rounded-2xl shadow-xl p-8 w-full max-w-sm">
     <div class="text-center mb-6">
-      <div class="text-[#002663] font-bold text-2xl tracking-wide">Mercy Ships</div>
-      <div class="text-[#897a6b] text-sm mt-1">Container Tracker</div>
+      <div class="text-[#1e293b] font-bold text-2xl tracking-wide">Shipping Container</div>
+      <div class="text-[#897a6b] text-sm mt-1">Tracker</div>
     </div>
     <div class="space-y-3">
       <input type="password" id="passcodeInput"
         placeholder="Enter passcode"
-        class="w-full border border-[#e6e8e8] rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#002663]"
+        class="w-full border border-[#e6e8e8] rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e293b]"
         onkeydown="if(event.key==='Enter')submitPasscode()"
       />
       <button onclick="submitPasscode()" id="passcodeBtn"
-        class="w-full bg-[#002663] hover:bg-[#02579a] active:bg-[#001a47] text-white font-semibold py-3 rounded-lg text-sm transition-colors">
+        class="w-full bg-[#1e293b] hover:bg-[#02579a] active:bg-[#0f172a] text-white font-semibold py-3 rounded-lg text-sm transition-colors">
         Enter
       </button>
       <div id="passcodeError" class="hidden text-center text-[#c4002b] text-xs pt-1">Incorrect passcode. Try again.</div>
@@ -469,14 +524,11 @@ const HTML = `<!DOCTYPE html>
 <!-- Main App -->
 <div id="mainApp" class="hidden">
 
-<header class="bg-gradient-to-r from-[#002663] to-[#02579a] text-white shadow-lg">
+<header class="bg-gradient-to-r from-[#1e293b] to-[#02579a] text-white shadow-lg">
   <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between flex-wrap gap-2">
     <div>
-      <h1 class="text-xl font-bold tracking-wide">Mercy Ships Container Tracker</h1>
-      <p class="text-[#4fc2f8] text-xs mt-0.5">MSC Shipping &nbsp;&middot;&nbsp; Houston &amp; Rotterdam &rarr; Freetown, Sierra Leone</p>
-      <div id="currentPortBadge" class="hidden text-[#4fc2f8] text-xs mt-1">
-        <span style="color:#4fc2f8b0">at</span> <span id="currentPortName" class="font-semibold text-white"></span>
-      </div>
+      <h1 class="text-xl font-bold tracking-wide">Shipping Container Tracker</h1>
+      <p class="text-[#4fc2f8] text-xs mt-0.5">Houston &amp; Rotterdam &rarr; <span id="destPort" class="font-semibold text-white">Freetown, Sierra Leone</span></p>
     </div>
     <div class="flex items-center gap-4">
       <div id="lastRefresh" class="text-[#4fc2f8] text-xs"></div>
@@ -495,13 +547,13 @@ const HTML = `<!DOCTYPE html>
     <h2 class="text-sm font-semibold text-[#262f3d] mb-3">Add Container</h2>
     <div class="flex gap-3">
       <input type="text" id="newContainerInput"
-        placeholder="e.g. MSDU6574161"
+        placeholder="e.g. MSDU6574161, or comma-separated for multiple"
         style="text-transform:uppercase"
-        class="flex-1 border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#002663] placeholder-[#a9adb1]"
+        class="flex-1 border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#1e293b] placeholder-[#a9adb1]"
         onkeydown="if(event.key==='Enter')addContainer()"
       />
       <button onclick="addContainer()"
-        class="bg-[#002663] hover:bg-[#02579a] active:bg-[#001a47] text-white font-semibold px-5 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
+        class="bg-[#1e293b] hover:bg-[#02579a] active:bg-[#0f172a] text-white font-semibold px-5 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
         + Add
       </button>
     </div>
@@ -510,7 +562,7 @@ const HTML = `<!DOCTYPE html>
 
   <!-- Tabs -->
   <div class="flex gap-1 border-b border-[#e6e8e8]">
-    <button onclick="switchTab('tracker')" id="tabTracker" class="px-4 py-2 text-sm font-semibold text-[#002663] border-b-2 border-[#002663]">
+    <button onclick="switchTab('tracker')" id="tabTracker" class="px-4 py-2 text-sm font-semibold text-[#1e293b] border-b-2 border-[#1e293b]">
       Tracker
     </button>
     <button onclick="switchTab('manage')" id="tabManage" class="px-4 py-2 text-sm font-semibold text-[#a9adb1] border-b-2 border-transparent hover:text-[#262f3d]">
@@ -535,12 +587,31 @@ const HTML = `<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Embark analytics: avg days from loaded at origin to received, by port of call -->
+  <div id="embarkStats" class="hidden mt-3 bg-white rounded-xl border border-[#e6e8e8] p-3 fade-in">
+    <div class="text-xs font-semibold text-[#897a6b] uppercase tracking-wide mb-2">Avg loaded &rarr; received (days), by port of call</div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-xs text-[#a9adb1] uppercase tracking-wide">
+            <th class="text-left py-1 pr-3 font-semibold">Port of Call</th>
+            <th class="text-right py-1 px-3 font-semibold">Houston</th>
+            <th class="text-right py-1 px-3 font-semibold">Rotterdam</th>
+            <th class="text-right py-1 pl-3 font-semibold">All</th>
+          </tr>
+        </thead>
+        <tbody id="embarkTableBody"></tbody>
+      </table>
+    </div>
+    <div id="embarkEmpty" class="hidden text-xs text-[#a9adb1] pt-1">No completed shipments with load + receive dates captured yet — this fills in as boxes are tracked and received.</div>
+  </div>
+
   <!-- Loading -->
   <div id="loadingState" class="hidden">
     <div class="bg-white rounded-2xl border border-[#e6e8e8] shadow-sm p-10 text-center">
       <svg class="spinner inline w-10 h-10 mb-4" viewBox="0 0 24 24" fill="none">
         <circle cx="12" cy="12" r="10" stroke="#e6e8e8" stroke-width="3"/>
-        <path d="M12 2a10 10 0 0 1 10 10" stroke="#002663" stroke-width="3" stroke-linecap="round"/>
+        <path d="M12 2a10 10 0 0 1 10 10" stroke="#1e293b" stroke-width="3" stroke-linecap="round"/>
       </svg>
       <p class="text-[#262f3d] font-semibold">Fetching tracking data&hellip;</p>
       <p class="text-[#a9adb1] text-xs mt-2">Contacting MSC via secure browser proxy. This takes 10&ndash;20 seconds.</p>
@@ -622,6 +693,8 @@ const HTML = `<!DOCTYPE html>
               <tr>
                 <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;containerNumber&apos;)">Container <span id="sort-Received-containerNumber" style="color:#c4c8cc">&#8645;</span></th>
                 <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;shipmentId&apos;)">Shipment # <span id="sort-Received-shipmentId" style="color:#c4c8cc">&#8645;</span></th>
+                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Loaded</th>
+                <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide">Discharged</th>
                 <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;originalEta&apos;)">Original ETA <span id="sort-Received-originalEta" style="color:#c4c8cc">&#8645;</span></th>
                 <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]" onclick="sortSection(&apos;Received&apos;,&apos;receivedAt&apos;)">Date Received <span id="sort-Received-receivedAt" style="color:#c4c8cc">&#8645;</span></th>
                 <th class="text-left px-4 py-3 font-semibold text-[#897a6b] text-xs uppercase tracking-wide cursor-pointer select-none hover:text-[#262f3d]">Port Received</th>
@@ -653,12 +726,12 @@ const HTML = `<!DOCTYPE html>
       <h2 class="text-sm font-semibold text-[#262f3d] mb-4">Ports of Call</h2>
       <div class="flex gap-3 mb-4 flex-wrap">
         <input type="text" id="newPortId" placeholder="UNLOCODE (e.g., SLFNT)" style="text-transform:uppercase; max-width:120px"
-          class="border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#002663]" />
+          class="border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#1e293b]" />
         <input type="text" id="newPortName" placeholder="Port name (e.g., Freetown, Sierra Leone)"
-          class="flex-1 border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002663]" />
+          class="flex-1 border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e293b]" />
         <input type="text" id="newPortCountry" placeholder="Country (e.g., SL)" style="text-transform:uppercase; max-width:80px"
-          class="border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002663]" />
-        <button onclick="addPort()" class="bg-[#002663] hover:bg-[#02579a] text-white font-semibold px-5 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
+          class="border border-[#e6e8e8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e293b]" />
+        <button onclick="addPort()" class="bg-[#1e293b] hover:bg-[#02579a] text-white font-semibold px-5 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
           + Add Port
         </button>
       </div>
@@ -686,7 +759,7 @@ const HTML = `<!DOCTYPE html>
       </div>
     </div>
     <div class="px-5 py-3 border-t border-[#e6e8e8] flex justify-end">
-      <button onclick="closeDuplicateModal()" class="bg-[#002663] hover:bg-[#02579a] text-white font-semibold px-4 py-2 rounded-lg text-sm">
+      <button onclick="closeDuplicateModal()" class="bg-[#1e293b] hover:bg-[#02579a] text-white font-semibold px-4 py-2 rounded-lg text-sm">
         OK
       </button>
     </div>
@@ -845,7 +918,7 @@ function showShipmentEdit(cn) {
   var current = (r && r.shipmentId) ? r.shipmentId : '';
   var html = '<span class="flex items-center gap-1 flex-wrap">' +
     '<input type="text" class="sedit-' + cn + '" value="' + current.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '" placeholder="e.g. 0426-NL0102G-SL" style="border:1px solid #e6e8e8;border-radius:6px;padding:2px 6px;font-size:0.75rem;min-width:150px" onkeydown="if(event.key===&apos;Enter&apos;)saveShipment(&apos;' + cn + '&apos;)" />' +
-    ' <button onclick="saveShipment(&apos;' + cn + '&apos;)" style="background:#002663;color:#fff;font-size:0.7rem;padding:3px 10px;border-radius:6px;font-weight:600">Save</button>' +
+    ' <button onclick="saveShipment(&apos;' + cn + '&apos;)" style="background:#1e293b;color:#fff;font-size:0.7rem;padding:3px 10px;border-radius:6px;font-weight:600">Save</button>' +
     ' <button onclick="cancelShipmentEdit(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.7rem">Cancel</button>' +
     '</span>';
   document.querySelectorAll('[data-shipment="' + cn + '"]').forEach(function(el) { el.innerHTML = html; });
@@ -886,7 +959,7 @@ function showReceivePrompt(cn) {
   var today = new Date().toISOString().split('T')[0];
   var html = '<div class="flex items-center gap-1 flex-wrap">' +
     '<input type="date" class="rdate-' + cn + '" value="' + today + '" style="border:1px solid #e6e8e8;border-radius:6px;padding:2px 6px;font-size:0.75rem" />' +
-    ' <button onclick="confirmReceived(&apos;' + cn + '&apos;)" style="background:#002663;color:#fff;font-size:0.7rem;padding:3px 10px;border-radius:6px;font-weight:600">Confirm</button>' +
+    ' <button onclick="confirmReceived(&apos;' + cn + '&apos;)" style="background:#1e293b;color:#fff;font-size:0.7rem;padding:3px 10px;border-radius:6px;font-weight:600">Confirm</button>' +
     ' <button onclick="cancelReceive(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.7rem">Cancel</button>' +
     '</div>';
   document.querySelectorAll('[data-actions="' + cn + '"]').forEach(function(el) { el.innerHTML = html; });
@@ -900,7 +973,8 @@ function cancelReceive(cn) {
 
 async function confirmReceived(cn) {
   var dateInputs = document.querySelectorAll('.rdate-' + cn);
-  var date = dateInputs.length ? dateInputs[0].value : new Date().toISOString().split('T')[0];
+  var date = dateInputs.length ? dateInputs[0].value : '';
+  if (!date) date = new Date().toISOString().split('T')[0];
   var passcode = sessionStorage.getItem('passcode') || '';
   try {
     var res = await fetch('/api/receive', {
@@ -908,8 +982,18 @@ async function confirmReceived(cn) {
       headers: { 'Content-Type': 'application/json', 'X-Passcode': passcode },
       body: JSON.stringify({ number: cn, receivedAt: date })
     });
-    if (res.ok) { trackAll(); }
-    else { alert('Failed to mark as received. Please try again.'); }
+    if (res.ok) {
+      if (lastResults[cn]) {
+        lastResults[cn].received = true;
+        lastResults[cn].receivedAt = date;
+      }
+      renderResults(Object.values(lastResults));
+    } else {
+      var errData = null;
+      try { errData = await res.json(); } catch(ignored) {}
+      var msg = (errData && errData.error) ? errData.error : ('HTTP ' + res.status);
+      alert('Failed to mark ' + cn + ' as received: ' + msg);
+    }
   } catch(e) { alert('Network error: ' + e.message); }
 }
 
@@ -922,8 +1006,10 @@ async function removeContainer(cn) {
     var res = await fetch('/api/list?number=' + encodeURIComponent(cn), {
       method: 'DELETE', headers: { 'X-Passcode': passcode }
     });
-    if (res.ok) { trackAll(); }
-    else { alert('Failed to remove container.'); }
+    if (res.ok) {
+      delete lastResults[cn];
+      renderResults(Object.values(lastResults));
+    } else { alert('Failed to remove container.'); }
   } catch(e) { alert('Network error: ' + e.message); }
 }
 
@@ -1114,6 +1200,8 @@ function renderReceivedSection(items, noStore) {
     rows += '<tr class="border-b border-[#f0f1f2] hover:bg-[#fafafa] transition-colors">' +
       '<td class="px-4 py-3"><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">Added ' + fmtDateISO(r.addedAt) + '</div></td>' +
       '<td class="px-4 py-3">' + shipmentCell(cn, r.shipmentId) + '</td>' +
+      '<td class="px-4 py-3" style="color:#262f3d">' + fmtDate(r.loadedAt) + '</td>' +
+      '<td class="px-4 py-3" style="color:#262f3d">' + fmtDate(r.dischargedAt) + '</td>' +
       '<td class="px-4 py-3" style="color:#262f3d">' + fmtDate(r.originalEta) + '</td>' +
       '<td class="px-4 py-3" style="color:#262f3d">' + fmtDateISO(r.receivedAt) + '</td>' +
       '<td class="px-4 py-3" style="color:#262f3d">' + (r.receivedPort || '\u2014') + '</td>' +
@@ -1126,6 +1214,8 @@ function renderReceivedSection(items, noStore) {
       '<div class="flex items-center justify-between mb-3"><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><span style="background:#e6e8e8;color:#897a6b;padding:2px 8px;border-radius:9999px;font-size:0.7rem;font-weight:600">Received</span></div>' +
       '<div class="grid grid-cols-2 gap-y-2 mb-3" style="font-size:0.75rem">' +
         '<span style="color:#897a6b">Shipment #</span><span>' + shipmentCell(cn, r.shipmentId) + '</span>' +
+        '<span style="color:#897a6b">Loaded</span><span>' + fmtDate(r.loadedAt) + '</span>' +
+        '<span style="color:#897a6b">Discharged</span><span>' + fmtDate(r.dischargedAt) + '</span>' +
         '<span style="color:#897a6b">Original ETA</span><span>' + fmtDate(r.originalEta) + '</span>' +
         '<span style="color:#897a6b">Received</span><span>' + fmtDateISO(r.receivedAt) + '</span>' +
         '<span style="color:#897a6b">Port Received</span><span>' + (r.receivedPort || '\u2014') + '</span>' +
@@ -1136,6 +1226,52 @@ function renderReceivedSection(items, noStore) {
   });
   tbody.innerHTML = rows;
   updateSortIndicators('Received', state.col, state.dir);
+}
+
+// Days between an MSC event date (DD/MM/YYYY) and an ISO received date (YYYY-MM-DD).
+function daysBetween(loadedStr, receivedStr) {
+  var load = parseDMY(loadedStr);
+  var recv = receivedStr ? new Date(receivedStr + 'T00:00:00') : null;
+  if (!load || !recv || isNaN(recv)) return null;
+  return Math.round((recv - load) / 86400000);
+}
+
+function renderEmbarkStats(received) {
+  // Group by destination port of call, split by origin (Houston / Rotterdam) plus an All column.
+  var ports = {};
+  received.forEach(function(r) {
+    if (!r.loadedAt || !r.receivedAt) return;
+    var d = daysBetween(r.loadedAt, r.receivedAt);
+    if (d === null || d < 0) return;
+    var key = r.destPort || '(Unknown)';
+    if (!ports[key]) ports[key] = { Houston: [], Rotterdam: [], all: [] };
+    ports[key].all.push(d);
+    if (r.originPort === 'Houston' || r.originPort === 'Rotterdam') ports[key][r.originPort].push(d);
+  });
+  function avg(arr) {
+    if (!arr.length) return '<span style="color:#c4c8cc">—</span>';
+    var m = arr.reduce(function(a, b) { return a + b; }, 0) / arr.length;
+    return m.toFixed(1) + ' <span style="font-size:0.7em;color:#a9adb1">n=' + arr.length + '</span>';
+  }
+  var keys = Object.keys(ports).sort(function(a, b) { return ports[b].all.length - ports[a].all.length; });
+  var body = document.getElementById('embarkTableBody');
+  var empty = document.getElementById('embarkEmpty');
+  if (!keys.length) {
+    body.innerHTML = '';
+    empty.classList.remove('hidden');
+  } else {
+    empty.classList.add('hidden');
+    body.innerHTML = keys.map(function(k) {
+      var p = ports[k];
+      return '<tr class="border-t border-[#f0f1f2]">' +
+        '<td class="text-left py-1.5 pr-3 font-semibold" style="color:#262f3d">' + k + '</td>' +
+        '<td class="text-right py-1.5 px-3" style="color:#262f3d">' + avg(p.Houston) + '</td>' +
+        '<td class="text-right py-1.5 px-3" style="color:#262f3d">' + avg(p.Rotterdam) + '</td>' +
+        '<td class="text-right py-1.5 pl-3 font-semibold" style="color:#02579a">' + avg(p.all) + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+  document.getElementById('embarkStats').classList.remove('hidden');
 }
 
 function renderResults(results) {
@@ -1149,6 +1285,7 @@ function renderResults(results) {
   document.getElementById('sumTransit').textContent = transit.length;
   document.getElementById('sumPort').textContent = port.length;
   document.getElementById('sumReceived').textContent = received.length;
+  renderEmbarkStats(received);
   document.getElementById('summaryBar').classList.remove('hidden');
   document.getElementById('resultsSection').classList.remove('hidden');
   renderSection('Transit', transit);
@@ -1289,14 +1426,11 @@ async function loadPortsAndVessels() {
 // ── Current Port Display ─────────────────────────────────────────────────────
 
 function updateCurrentPortDisplay(port) {
-  var badge = document.getElementById('currentPortBadge');
-  var name = document.getElementById('currentPortName');
-  if (port && port.name) {
-    name.textContent = port.name;
-    badge.classList.remove('hidden');
-  } else {
-    badge.classList.add('hidden');
-  }
+  // Header destination tracks the app's Current Port setting (Manage Ports tab).
+  // Falls back to the primary destination when no current port is set.
+  var dest = document.getElementById('destPort');
+  if (!dest) return;
+  dest.textContent = (port && port.name) ? port.name : 'Freetown, Sierra Leone';
 }
 
 async function setCurrentPort(portId) {
@@ -1331,21 +1465,21 @@ function switchTab(tab) {
   var tabManage = document.getElementById('tabManage');
   
   if (isTracker) {
-    tabTracker.classList.add('border-[#002663]');
-    tabTracker.classList.add('text-[#002663]');
+    tabTracker.classList.add('border-[#1e293b]');
+    tabTracker.classList.add('text-[#1e293b]');
     tabTracker.classList.remove('border-transparent');
     tabTracker.classList.remove('text-[#a9adb1]');
-    tabManage.classList.remove('border-[#002663]');
-    tabManage.classList.remove('text-[#002663]');
+    tabManage.classList.remove('border-[#1e293b]');
+    tabManage.classList.remove('text-[#1e293b]');
     tabManage.classList.add('border-transparent');
     tabManage.classList.add('text-[#a9adb1]');
   } else {
-    tabTracker.classList.remove('border-[#002663]');
-    tabTracker.classList.remove('text-[#002663]');
+    tabTracker.classList.remove('border-[#1e293b]');
+    tabTracker.classList.remove('text-[#1e293b]');
     tabTracker.classList.add('border-transparent');
     tabTracker.classList.add('text-[#a9adb1]');
-    tabManage.classList.add('border-[#002663]');
-    tabManage.classList.add('text-[#002663]');
+    tabManage.classList.add('border-[#1e293b]');
+    tabManage.classList.add('text-[#1e293b]');
     tabManage.classList.remove('border-transparent');
     tabManage.classList.remove('text-[#a9adb1]');
     refreshManagementUI();
@@ -1364,13 +1498,13 @@ async function refreshManagementUI() {
       var html = '<div class="space-y-2">';
       ports.forEach(function(p) {
         var isCurrent = currentPort && currentPort.id === p.id;
-        html += '<div class="flex items-center justify-between rounded-lg p-3 ' + (isCurrent ? 'bg-[#002663] text-white' : 'bg-[#f7f7f7]') + '">' +
+        html += '<div class="flex items-center justify-between rounded-lg p-3 ' + (isCurrent ? 'bg-[#1e293b] text-white' : 'bg-[#f7f7f7]') + '">' +
           '<div>' +
             '<div class="font-semibold ' + (isCurrent ? 'text-white' : 'text-[#262f3d]') + '">' + p.name + (isCurrent ? ' <span style="font-size:0.65rem;font-weight:600;background:#4fc2f830;border-radius:4px;padding:1px 5px">CURRENT</span>' : '') + '</div>' +
             '<div class="text-xs ' + (isCurrent ? 'text-[#4fc2f8]' : 'text-[#a9adb1]') + '">' + p.id + ' · ' + p.country + '</div>' +
           '</div>' +
           '<div class="flex items-center gap-2">' +
-            (!isCurrent ? '<button onclick="setCurrentPort(&apos;' + p.id + '&apos;)" class="text-[#02579a] hover:text-[#002663] text-xs font-semibold">Set Current</button>' : '') +
+            (!isCurrent ? '<button onclick="setCurrentPort(&apos;' + p.id + '&apos;)" class="text-[#02579a] hover:text-[#1e293b] text-xs font-semibold">Set Current</button>' : '') +
             '<button onclick="deletePort(&apos;' + p.id + '&apos;)" class="' + (isCurrent ? 'text-[#4fc2f8]' : 'text-[#c4002b]') + ' hover:opacity-75 text-xs font-semibold">Remove</button>' +
           '</div>' +
           '</div>';
@@ -1471,6 +1605,7 @@ export default {
     if (url.pathname === '/api/ports') return handlePorts(request, env);
     if (url.pathname === '/api/vessel') return handleVessel(request, env);
     if (url.pathname === '/api/current-port') return handleCurrentPort(request, env);
+    if (url.pathname === '/api/debug' && request.method === 'GET') return handleDebug(request, env);
     if (url.pathname === '/robots.txt') return handleRobots();
 
     return new Response(HTML, {

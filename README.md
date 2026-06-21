@@ -1,8 +1,8 @@
-# Mercy Ships Container Tracker
+# Shipping Container Tracker
 
-A lightweight shipping container tracking dashboard built for [Mercy Ships](https://www.mercyships.org), tracking MSC containers from Houston and Rotterdam to Freetown, Sierra Leone.
+A lightweight shipping container tracking dashboard for MSC containers from Houston and Rotterdam to Freetown, Sierra Leone.
 
-**Live app:** https://mercy-ships-tracker.mercy-ships-shipping.workers.dev
+**Live app:** https://shipping-container-tracker.confluence-ops.workers.dev
 
 ---
 
@@ -75,11 +75,11 @@ MSNU2320702
 - [Modal.com](https://modal.com) — serverless Python, free tier
 - [curl_cffi](https://github.com/yifeikong/curl_cffi) — Chrome TLS impersonation
 - [Tailwind CSS](https://tailwindcss.com) — CDN for styling
-- [Open Sans](https://fonts.google.com/specimen/Open+Sans) — Mercy Ships brand font
+- [Open Sans](https://fonts.google.com/specimen/Open+Sans) — clean, legible UI font
 
 ## Ideas for future development
 
-- Custom domain (e.g. `tracker.mercyships.org`)
+- Custom domain (e.g. `tracker.example.com`)
 - Email or Slack alerts when container status or ETA changes
 - Auto-refresh on a scheduled interval
 - Support for additional carriers (Maersk, CMA CGM)

@@ -1,10 +1,10 @@
-# Mercy Ships Container Tracker — Project Instructions
+# Shipping Container Tracker — Project Instructions
 
 ## What This Is
 
-A lightweight shipping container tracking dashboard for [Mercy Ships](https://www.mercyships.org). Tracks MSC containers from Houston and Rotterdam to Freetown, Sierra Leone. Shared container list across all users; mobile-friendly card + desktop table view.
+A lightweight shipping container tracking dashboard. Tracks MSC containers from Houston and Rotterdam to Freetown, Sierra Leone. Shared container list across all users; mobile-friendly card + desktop table view.
 
-**Live app:** https://mercy-ships-tracker.mercy-ships-shipping.workers.dev
+**Live app:** https://shipping-container-tracker.confluence-ops.workers.dev
 
 ## Architecture
 
@@ -25,7 +25,7 @@ This follows the canonical pattern in AI_RULES §3 and §5: Cloudflare Worker fo
 ## Project-Specific Decisions
 
 1. **Why a Python proxy at all?** MSC's API sits behind Akamai bot detection that blocks any client without a real Chrome TLS fingerprint. Cloudflare Workers can't impersonate TLS handshakes — only a native HTTP client like `curl_cffi` can. So the Worker delegates the actual MSC call to Modal. See AI_RULES §2 for the TLS-fingerprinting rule.
-2. **Shared container list, not per-user.** Stored in KV (`TRACKER_KV`) under a single key. Any authenticated user adds/removes from the same list. Matches the Mercy Ships logistics team's actual workflow.
+2. **Shared container list, not per-user.** Stored in KV (`TRACKER_KV`) under a single key. Any authenticated user adds/removes from the same list. Matches the logistics team's actual workflow.
 3. **30 container max per request.** Hard cap in `msc_proxy.py:29` to prevent runaway Modal cost and stay inside reasonable Modal cold-start time budgets.
 4. **`chrome124` impersonation pinned.** Newer Chrome versions in `curl_cffi` sometimes get blocked by Akamai while older ones still pass. Keep `chrome124` until a regression forces an update.
 
@@ -36,7 +36,7 @@ This follows the canonical pattern in AI_RULES §3 and §5: Cloudflare Worker fo
 
 ## Endpoints
 
-- **Worker:** https://mercy-ships-tracker.mercy-ships-shipping.workers.dev
+- **Worker:** https://shipping-container-tracker.confluence-ops.workers.dev
 - **Modal:** https://jeffsleft--msc-tracker-track.modal.run (referenced as `MODAL_URL` in `src/worker.js:9`)
 
 ## KV Bindings
