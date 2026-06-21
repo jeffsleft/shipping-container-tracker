@@ -12,6 +12,20 @@ Shipping container tracking dashboard for the Mercy Ships logistics team. Tracks
 
 ## Wins
 
+### De-brand, Handoff & Embark Analytics (2026-06-21)
+- Cleanly de-branded a production app for handoff: renamed the directory, GitHub repo,
+  Cloudflare Worker, and account workers.dev subdomain (`mercy-ships-shipping` →
+  `confluence-ops`) with zero downtime and no broken references — verified the shared
+  account subdomain didn't break the co-resident investing proxy before flipping it.
+- Retired the old Worker safely by disabling its route (`workers_dev = false`) rather
+  than deleting blind — kept the script recoverable, scheduled the actual delete.
+- Added an operational metric the team didn't have: **average loaded → received days,
+  broken out per destination port of call** (Las Palmas / Freetown / Tema) and per
+  origin (Houston / Rotterdam). Reused the existing capture-once-into-KV pattern so the
+  metric builds itself from the live MSC feed with no new infrastructure.
+- Made the header destination dynamic — it now tracks the app's Current Port setting
+  instead of a hardcoded port, so the tool generalizes past one route.
+
 ### Production Support & Hardening (2026-06-01)
 - Diagnosed and fixed a live production bug affecting the Mercy Ships logistics team — containers couldn't be marked as received; traced root cause to comma-separated input being stored as a single KV entry
 - Repaired KV data directly via wrangler without downtime; 6 containers restored to individually-trackable state
