@@ -96,7 +96,6 @@ Targeted `grep "mercy-ships-shipping" HANDOFF.md` found the string; edited it di
 
 ### Open follow-ups
 - **Validate MSC event parsing** for "loaded"/"discharged" against a real box on next refresh; `eventDateAt()` keyword matching is fragile and untested on live data.
-- **Delete `mercy-ships-tracker`** Thursday 2026-06-25 (Todoist `6gwC8WqXj6xPgFpG`).
 
 ---
 
