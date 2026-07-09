@@ -843,6 +843,7 @@ function etaHtml(str, originalEta) {
 
 function classifyStatus(r) {
   if (r.received) return 'received';
+  if (r.delivered) return 'port';
   var s = (r.status || '').toLowerCase();
   if (s.includes('discharg') || s.includes('import') || s.includes('arriv')) return 'port';
   return 'transit';
@@ -852,6 +853,9 @@ function statusBadge(r) {
   var base = 'display:inline-block;padding:2px 8px;border-radius:9999px;font-size:0.7rem;font-weight:600;';
   if (!r.success) return '<span style="' + base + 'background:#fce8ec;color:#c4002b">Error</span>';
   var s = (r.status || '').toLowerCase();
+  if (r.delivered || s.includes('deliver')) {
+    return '<span style="' + base + 'background:#e6f4ea;color:#1e7e34">' + (r.status || 'Delivered') + '</span>';
+  }
   if (s.includes('load') || s.includes('depart') || s.includes('sail') || s.includes('transit')) {
     return '<span style="' + base + 'background:#e8eef5;color:#02579a">' + r.status + '</span>';
   }

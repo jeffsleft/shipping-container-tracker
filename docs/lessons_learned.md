@@ -4,6 +4,20 @@ Technical failures and their resolutions, per AI_RULES §4. Append new entries a
 
 ---
 
+## 2026-07-09 — "Delivered" container rendered in the "In Transit" section
+
+**Problem:** MSDU9740543 showed a "Delivered" badge but sat in the "In Transit" section. Any delivered container hit this.
+
+**Root cause:** Status was derived in two independent places that drifted apart. `statusBadge()` knew about MSC's `Delivered: true` flag and rendered "Delivered"; `classifyStatus()` did not — it only bucketed on the status *text* (`discharg`/`import`/`arriv`), so "Delivered" fell through to the default `transit` bucket. Badge and section disagreed.
+
+**Resolution:** Added `if (r.delivered) return 'port';` to `classifyStatus()` (delivered = at/past destination port) and a green "Delivered" badge to `statusBadge()`. Both now consult the `delivered` boolean.
+
+**Also confirmed (not a bug):** Same container's destination read as "Las Palmas, ES", not Freetown. That is correct — it's MSC's actual `PortOfDischarge` for that bill of lading (Houston → Valencia transship → Las Palmas, delivered to consignee). The app reads per-container destination from `gi.PortOfDischarge`; the "Freetown" in the header is a cosmetic app-level label only.
+
+**Future agents:** Keep `classifyStatus()` and `statusBadge()` in sync — if you add a status either function recognizes, teach both. They independently classify the same MSC response and will silently contradict each other otherwise.
+
+---
+
 ## 2026-06-01 — Comma-separated input stored as single KV entry, breaking receive/remove
 
 **Problem:** Users pasted multiple container numbers separated by commas into the add form (e.g. `MSDU9858243, CAAU8066791`). The add handler accepted the entire string as one container number. MSC's tracking API happens to split on commas internally, so all containers appeared correctly in the UI — but `handleReceive` and `handleListDelete` do exact-string lookups, so neither could find individual numbers like `MSDU9858243`. Both silently "succeeded" (remove returned 200 even though nothing was deleted) while nothing actually changed.
