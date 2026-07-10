@@ -12,6 +12,27 @@ Shipping container tracking dashboard for the Mercy Ships logistics team. Tracks
 
 ## Wins
 
+### Departure-Proofing: Full Hardening Pass (2026-07-10)
+- Ran a top-to-bottom reliability review and shipped every finding in one session,
+  aimed at one outcome: the tool keeps running after Jeff leaves the ship.
+- Fixed three silent-failure bugs found by static review before any user hit them:
+  remove-port did nothing (API rejected the request shape), containers beyond 30
+  vanished from the dashboard (proxy truncation), and a refresh could erase a
+  container added during the 10–20s MSC round trip (write-back race).
+- Added a **daily automated health check (canary)**: a Cloudflare cron tracks known
+  containers through the Modal/MSC path and the dashboard shows a red warning banner
+  the morning the MSC integration breaks — converting "the tool quietly rotted" into
+  "the team gets told." Zero new infrastructure, zero new accounts.
+- Removed the app's only runtime CDN dependencies for styling by compiling and
+  inlining the CSS — the dashboard now renders fully styled on degraded ship
+  internet even if third-party CDNs are unreachable.
+- Closed the XSS surface (escaped all MSC-supplied and user-entered strings at
+  render; sanitized container/port IDs at the API) and deleted the dead vessel
+  code left from Session 1.
+- Corrected the technical handover document for the successor so its integration
+  guidance matches the system as built (right endpoint, auth requirement, date
+  format, current bucketing logic).
+
 ### De-brand, Handoff & Embark Analytics (2026-06-21)
 - Cleanly de-branded a production app for handoff: renamed the directory, GitHub repo,
   Cloudflare Worker, and account workers.dev subdomain (`mercy-ships-shipping` →

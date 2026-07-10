@@ -4,6 +4,40 @@ Technical failures and their resolutions, per AI_RULES §4. Append new entries a
 
 ---
 
+## 2026-07-10 — Hardening pass: silent-failure bugs and the inline-Tailwind backslash trap
+
+**Delete-port silently failed since Session 1.** `deletePort()` POSTed the whole
+filtered ports *array* to `/api/ports`, but the handler only accepted a single
+`{id, name, country}` object — `body.id` was undefined, the API returned 400, and
+the UI showed nothing. Fixed with a proper `DELETE /api/ports?id=` route.
+**Pattern to watch:** a UI action that "does nothing" with no error usually means
+the API rejected the request shape — check the handler's expected body first.
+
+**Modal proxy truncation was invisible.** The Worker sent all active containers;
+`msc_proxy.py` silently sliced to 30 — container #31+ would just vanish from the
+dashboard. Worker now chunks into ≤30-container batches (`Promise.all`).
+
+**Track write-back raced adds.** `/api/track` read KV, waited 10–20s on MSC, then
+wrote the stale list back — overwriting any container added meanwhile. Now re-reads
+KV before the write and merges only the captured fields (matched on number+addedAt).
+
+**Inline Tailwind + template literals = backslash trap.** The compiled Tailwind CSS
+contains escaped selectors like `.bg-\[\#1e293b\]`. Inside a normal JS template
+literal, `\[` silently collapses to `[`, corrupting every arbitrary-value selector.
+The CSS therefore lives in a `String.raw` tagged template (`TAILWIND_CSS`) and is
+interpolated into the HTML. **Future agents:** when regenerating the CSS
+(`npx tailwindcss --content src/worker.js -o tw.css --minify` after adding classes),
+paste it inside `String.raw` backticks — never into a plain string or template
+literal. Verify the output contains no backticks or `${` before pasting.
+
+**Canary exists now.** Daily cron (06:00 UTC) tracks up to 3 active containers via
+Modal and writes pass/fail to KV `canaryStatus`; the dashboard shows a red banner
+when it fails. When MSC/Akamai breaks the chrome124 impersonation, this is the
+signal — check the banner detail, then test `impersonate="chrome131"` (or newer)
+in msc_proxy.py.
+
+---
+
 ## 2026-07-09 — "Delivered" container rendered in the "In Transit" section
 
 **Problem:** MSDU9740543 showed a "Delivered" badge but sat in the "In Transit" section. Any delivered container hit this.

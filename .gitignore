@@ -30,3 +30,9 @@ design-schematics/
 HANDOFF.md
 IMPLEMENTATION_SUMMARY.md
 features.json
+
+# wrangler local secrets
+.dev.vars
+
+# Internal handover docs (repo is public)
+docs/*.docx

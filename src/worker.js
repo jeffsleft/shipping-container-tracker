@@ -52,15 +52,6 @@ async function savePorts(env, ports) {
   await env.TRACKER_KV.put('ports', JSON.stringify(ports));
 }
 
-async function getVessels(env) {
-  const raw = await env.TRACKER_KV.get('vessels');
-  return raw ? JSON.parse(raw) : {};
-}
-
-async function saveVessels(env, vessels) {
-  await env.TRACKER_KV.put('vessels', JSON.stringify(vessels));
-}
-
 async function getCurrentPort(env) {
   const raw = await env.TRACKER_KV.get('currentPort');
   return raw ? JSON.parse(raw) : null;
@@ -166,13 +157,14 @@ async function handleListPost(request, env) {
   let body;
   try { body = await request.json(); } catch(e) { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
 
-  // Parse comma-separated input — prevents multi-number strings from being stored as one entry
-  const numbers = (body.number || '').split(',').map(function(n) { return n.trim().toUpperCase(); }).filter(Boolean);
+  // Parse comma-separated input — prevents multi-number strings from being stored as one entry.
+  // Container numbers are strictly alphanumeric (ISO 6346); stripping anything else
+  // keeps stored numbers safe to embed in the UI's inline onclick handlers.
+  const numbers = (body.number || '').split(',').map(function(n) { return n.trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }).filter(Boolean);
   if (!numbers.length) return Response.json({ error: 'Container number required' }, { status: 400 });
 
   const containers = await getContainers(env);
   const today = new Date().toISOString().slice(0, 10);
-  const vesselId = body.vesselId || null;
   const added = [], duplicates = [];
 
   numbers.forEach(function(number) {
@@ -180,7 +172,7 @@ async function handleListPost(request, env) {
     if (existing) {
       duplicates.push({ number: existing.number, addedAt: existing.addedAt, shipmentId: existing.shipmentId });
     } else {
-      containers.push({ number: number, addedAt: today, originalEta: null, received: false, receivedAt: null, shipmentId: null, vesselId: vesselId, location: 'In Transit', receivedPort: null });
+      containers.push({ number: number, addedAt: today, originalEta: null, received: false, receivedAt: null, shipmentId: null, location: 'In Transit', receivedPort: null });
       added.push(number);
     }
   });
@@ -221,18 +213,6 @@ async function handleReceive(request, env) {
   const c = containers.find(function(c) { return c.number && c.number.trim().toUpperCase() === number; });
   if (!c) return Response.json({ error: 'Container not found in tracker list: ' + number }, { status: 404 });
 
-  if (c.vesselId && receivedPort) {
-    const vessels = await getVessels(env);
-    const vessel = vessels[c.vesselId];
-    if (vessel && vessel.currentPort !== receivedPort) {
-      return Response.json({
-        error: 'Receive port does not match vessel current port',
-        vesselCurrentPort: vessel.currentPort,
-        attemptedPort: receivedPort
-      }, { status: 422 });
-    }
-  }
-
   c.received = true;
   c.receivedAt = receivedAt;
   c.receivedPort = receivedPort;
@@ -259,36 +239,6 @@ async function handleShipment(request, env) {
   return Response.json({ success: true });
 }
 
-// ─── Route: PUT /api/list (update container location/vessel) ───────────────────────────────────────────────
-
-async function handleListPut(request, env) {
-  if (!checkPasscode(request, env)) return unauthorized();
-  let body;
-  try { body = await request.json(); } catch(e) { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
-  const number = (body.number || '').trim().toUpperCase();
-  if (!number) return Response.json({ error: 'Container number required' }, { status: 400 });
-  const containers = await getContainers(env);
-  const c = containers.find(function(c) { return c.number === number; });
-  if (!c) return Response.json({ error: 'Container not found' }, { status: 404 });
-
-  const location = (body.location || c.location || 'In Transit');
-  const vesselId = body.vesselId || c.vesselId || null;
-  const portId = body.portId || null;
-
-  if (location === 'In Port' && vesselId && portId) {
-    const vessels = await getVessels(env);
-    const vessel = vessels[vesselId];
-    if (vessel && vessel.currentPort !== portId) {
-      return Response.json({ error: 'Location port does not match vessel current port', vesselCurrentPort: vessel.currentPort, attemptedPort: portId }, { status: 422 });
-    }
-  }
-
-  c.location = location;
-  c.vesselId = vesselId;
-  await saveContainers(env, containers);
-  return Response.json({ success: true, container: c });
-}
-
 // ─── Route: GET/POST /api/ports ───────────────────────────────────────────────
 
 async function handlePorts(request, env) {
@@ -300,7 +250,8 @@ async function handlePorts(request, env) {
   if (request.method === 'POST') {
     let body;
     try { body = await request.json(); } catch(e) { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
-    const id = (body.id || '').trim().toUpperCase();
+    // UNLOCODEs are strictly alphanumeric — sanitized so port ids are safe in inline onclick handlers
+    const id = (body.id || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
     const name = (body.name || '').trim();
     const country = (body.country || '').trim();
     if (!id || !name) return Response.json({ error: 'Port id and name required' }, { status: 400 });
@@ -313,32 +264,15 @@ async function handlePorts(request, env) {
     await savePorts(env, ports);
     return Response.json({ success: true, port: { id: id, name: name, country: country } });
   }
-  return Response.json({ error: 'Method not allowed' }, { status: 405 });
-}
-
-// ─── Route: POST /api/vessel ──────────────────────────────────────────────────
-
-async function handleVessel(request, env) {
-  if (!checkPasscode(request, env)) return unauthorized();
-  if (request.method === 'POST') {
-    let body;
-    try { body = await request.json(); } catch(e) { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
-    const vesselId = (body.vesselId || '').trim();
-    const currentPort = (body.currentPort || '').trim();
-    if (!vesselId) return Response.json({ error: 'Vessel ID required' }, { status: 400 });
-
-    const vessels = await getVessels(env);
-    vessels[vesselId] = vessels[vesselId] || {};
-    vessels[vesselId].vesselId = vesselId;
-    vessels[vesselId].vesselName = body.vesselName || vesselId;
-    if (currentPort) vessels[vesselId].currentPort = currentPort;
-    if (body.portsOfCall) vessels[vesselId].portsOfCall = body.portsOfCall;
-    await saveVessels(env, vessels);
-    return Response.json({ success: true, vessel: vessels[vesselId] });
-  }
-  if (request.method === 'GET') {
-    const vessels = await getVessels(env);
-    return Response.json(vessels);
+  if (request.method === 'DELETE') {
+    const url = new URL(request.url);
+    const id = (url.searchParams.get('id') || '').trim().toUpperCase();
+    if (!id) return Response.json({ error: 'Port id required' }, { status: 400 });
+    const ports = await getPorts(env);
+    const filtered = ports.filter(function(p) { return p.id !== id; });
+    if (filtered.length === ports.length) return Response.json({ error: 'Port not found' }, { status: 404 });
+    await savePorts(env, filtered);
+    return Response.json({ success: true });
   }
   return Response.json({ error: 'Method not allowed' }, { status: 405 });
 }
@@ -398,12 +332,20 @@ async function handleTrackRequest(request, env) {
 
   let modalResults;
   try {
-    const modalRes = await fetch(
-      MODAL_URL + '?containers=' + encodeURIComponent(active.map(function(c) { return c.number; }).join(',')),
-      { headers: { 'Accept': 'application/json' } }
-    );
-    if (!modalRes.ok) throw new Error('Proxy error: HTTP ' + modalRes.status);
-    modalResults = await modalRes.json();
+    // The Modal proxy caps each request at 30 containers and silently drops the
+    // rest — chunk here so containers beyond 30 still get tracked.
+    const chunks = [];
+    for (let i = 0; i < active.length; i += 30) chunks.push(active.slice(i, i + 30));
+    const responses = await Promise.all(chunks.map(function(chunk) {
+      return fetch(
+        MODAL_URL + '?containers=' + encodeURIComponent(chunk.map(function(c) { return c.number; }).join(',')),
+        { headers: { 'Accept': 'application/json' } }
+      ).then(function(res) {
+        if (!res.ok) throw new Error('Proxy error: HTTP ' + res.status);
+        return res.json();
+      });
+    }));
+    modalResults = responses.flat();
   } catch (err) {
     const errorResults = active.map(function(c) {
       return { success: false, containerNumber: c.number, error: 'Tracking service error: ' + err.message };
@@ -439,8 +381,6 @@ async function handleTrackRequest(request, env) {
       originalEta: kvEntry ? kvEntry.originalEta : null,
       addedAt: kvEntry ? kvEntry.addedAt : null,
       shipmentId: kvEntry ? (kvEntry.shipmentId || null) : null,
-      vesselId: kvEntry ? (kvEntry.vesselId || null) : null,
-      location: kvEntry ? (kvEntry.location || 'In Transit') : 'In Transit',
       originPort: kvEntry ? (kvEntry.originPort || parsed.originPort || null) : (parsed.originPort || null),
       destPort: kvEntry ? (kvEntry.destPort || parsed.destPort || null) : (parsed.destPort || null),
       loadedAt: kvEntry ? (kvEntry.loadedAt || parsed.loadedDate || null) : (parsed.loadedDate || null),
@@ -449,12 +389,67 @@ async function handleTrackRequest(request, env) {
   });
 
   if (needsKvUpdate) {
-    await saveContainers(env, storedList);
+    // Re-read before write-back: the Modal round trip takes 10-20s, and saving
+    // the list read before it would overwrite any add/receive made in between.
+    // Merge only the captured fields into the fresh list.
+    const fresh = await getContainers(env);
+    storedList.forEach(function(stale) {
+      const f = fresh.find(function(c) { return c.number === stale.number && c.addedAt === stale.addedAt; });
+      if (!f) return;
+      ['originalEta', 'originPort', 'destPort', 'loadedAt', 'dischargedAt'].forEach(function(k) {
+        if (!f[k] && stale[k]) f[k] = stale[k];
+      });
+    });
+    await saveContainers(env, fresh);
   }
 
   return Response.json(activeResults.concat(receivedResults), {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
   });
+}
+
+// ─── Canary: daily MSC lookup health check ───────────────────────────────────
+// The whole system depends on the Modal proxy's Chrome TLS impersonation
+// continuing to pass MSC's Akamai bot detection. When that breaks, tracking
+// fails silently ("Container not found" for every box). The canary tracks up
+// to 3 known containers daily and records pass/fail so the UI can warn.
+
+async function runCanary(env) {
+  const status = { lastRun: new Date().toISOString(), ok: true, detail: '' };
+  try {
+    const containers = await getContainers(env);
+    const active = containers.filter(function(c) { return !c.received; }).slice(0, 3);
+    if (active.length === 0) {
+      status.detail = 'No active containers to check';
+    } else {
+      const res = await fetch(
+        MODAL_URL + '?containers=' + encodeURIComponent(active.map(function(c) { return c.number; }).join(',')),
+        { headers: { 'Accept': 'application/json' } }
+      );
+      if (!res.ok) throw new Error('Proxy HTTP ' + res.status);
+      const results = await res.json();
+      const anyParsed = results.some(function(item) {
+        return item.success && parseMSCResponse(item.mscResponse, item.containerNumber).success;
+      });
+      if (!anyParsed) {
+        throw new Error('MSC returned no usable data for ' + active.length + ' known container(s) — likely Akamai block or MSC API change');
+      }
+      status.detail = 'OK (' + active.length + ' container(s) checked)';
+    }
+  } catch (err) {
+    status.ok = false;
+    status.detail = err.message;
+  }
+  await env.TRACKER_KV.put('canaryStatus', JSON.stringify(status));
+  return status;
+}
+
+// ─── Route: GET /api/canary ───────────────────────────────────────────────────
+
+async function handleCanaryGet(request, env) {
+  if (!checkPasscode(request, env)) return unauthorized();
+  const raw = await env.TRACKER_KV.get('canaryStatus');
+  return Response.json(raw ? JSON.parse(raw) : { ok: true, lastRun: null, detail: 'Not yet run' });
 }
 
 // ─── Route: GET /api/debug ────────────────────────────────────────────────────
@@ -479,6 +474,12 @@ function handleRobots() {
 
 // ─── HTML Frontend ────────────────────────────────────────────────────────────
 
+// Compiled Tailwind utilities, inlined so styling has no runtime CDN dependency
+// (ship internet). Regenerate after adding/removing Tailwind classes in the HTML:
+//   npx tailwindcss --content src/worker.js -o tw.css --minify
+// then paste the output between the String.raw backticks below.
+const TAILWIND_CSS = String.raw`*,::backdrop,:after,:before{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:#3b82f680;--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }/*! tailwindcss v3.4.19 | MIT License | https://tailwindcss.com*/*,:after,:before{box-sizing:border-box;border:0 solid #e5e7eb}:after,:before{--tw-content:""}:host,html{line-height:1.5;-webkit-text-size-adjust:100%;-moz-tab-size:4;-o-tab-size:4;tab-size:4;font-family:ui-sans-serif,system-ui,sans-serif,Apple Color Emoji,Segoe UI Emoji,Segoe UI Symbol,Noto Color Emoji;font-feature-settings:normal;font-variation-settings:normal;-webkit-tap-highlight-color:transparent}body{margin:0;line-height:inherit}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,pre,samp{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,Liberation Mono,Courier New,monospace;font-feature-settings:normal;font-variation-settings:normal;font-size:1em}small{font-size:80%}sub,sup{font-size:75%;line-height:0;position:relative;vertical-align:initial}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}button,input,optgroup,select,textarea{font-family:inherit;font-feature-settings:inherit;font-variation-settings:inherit;font-size:100%;font-weight:inherit;line-height:inherit;letter-spacing:inherit;color:inherit;margin:0;padding:0}button,select{text-transform:none}button,input:where([type=button]),input:where([type=reset]),input:where([type=submit]){-webkit-appearance:button;background-color:initial;background-image:none}:-moz-focusring{outline:auto}:-moz-ui-invalid{box-shadow:none}progress{vertical-align:initial}::-webkit-inner-spin-button,::-webkit-outer-spin-button{height:auto}[type=search]{-webkit-appearance:textfield;outline-offset:-2px}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-file-upload-button{-webkit-appearance:button;font:inherit}summary{display:list-item}blockquote,dd,dl,figure,h1,h2,h3,h4,h5,h6,hr,p,pre{margin:0}fieldset{margin:0}fieldset,legend{padding:0}menu,ol,ul{list-style:none;margin:0;padding:0}dialog{padding:0}textarea{resize:vertical}input::-moz-placeholder,textarea::-moz-placeholder{opacity:1;color:#9ca3af}input::placeholder,textarea::placeholder{opacity:1;color:#9ca3af}[role=button],button{cursor:pointer}:disabled{cursor:default}audio,canvas,embed,iframe,img,object,svg,video{display:block;vertical-align:middle}img,video{max-width:100%;height:auto}[hidden]:where(:not([hidden=until-found])){display:none}.container{width:100%}@media (min-width:640px){.container{max-width:640px}}@media (min-width:768px){.container{max-width:768px}}@media (min-width:1024px){.container{max-width:1024px}}@media (min-width:1280px){.container{max-width:1280px}}@media (min-width:1536px){.container{max-width:1536px}}.fixed{position:fixed}.inset-0{inset:0}.z-50{z-index:50}.mx-auto{margin-left:auto;margin-right:auto}.mb-2{margin-bottom:.5rem}.mb-3{margin-bottom:.75rem}.mb-4{margin-bottom:1rem}.mb-6{margin-bottom:1.5rem}.ml-auto{margin-left:auto}.mt-0\.5{margin-top:.125rem}.mt-1{margin-top:.25rem}.mt-2{margin-top:.5rem}.mt-3{margin-top:.75rem}.block{display:block}.inline{display:inline}.flex{display:flex}.table{display:table}.grid{display:grid}.hidden{display:none}.h-10{height:2.5rem}.h-2\.5{height:.625rem}.h-3\.5{height:.875rem}.h-4{height:1rem}.max-h-\[80vh\]{max-height:80vh}.min-h-screen{min-height:100vh}.w-10{width:2.5rem}.w-2\.5{width:.625rem}.w-3\.5{width:.875rem}.w-4{width:1rem}.w-full{width:100%}.max-w-6xl{max-width:72rem}.max-w-lg{max-width:32rem}.max-w-sm{max-width:24rem}.flex-1{flex:1 1 0%}.flex-shrink-0{flex-shrink:0}.transform{transform:translate(var(--tw-translate-x),var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y))}.cursor-pointer{cursor:pointer}.select-none{-webkit-user-select:none;-moz-user-select:none;user-select:none}.grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.flex-wrap{flex-wrap:wrap}.items-center{align-items:center}.justify-end{justify-content:flex-end}.justify-center{justify-content:center}.justify-between{justify-content:space-between}.gap-1{gap:.25rem}.gap-2{gap:.5rem}.gap-3{gap:.75rem}.gap-4{gap:1rem}.gap-y-2{row-gap:.5rem}.space-y-1>:not([hidden])~:not([hidden]){--tw-space-y-reverse:0;margin-top:calc(.25rem*(1 - var(--tw-space-y-reverse)));margin-bottom:calc(.25rem*var(--tw-space-y-reverse))}.space-y-2>:not([hidden])~:not([hidden]){--tw-space-y-reverse:0;margin-top:calc(.5rem*(1 - var(--tw-space-y-reverse)));margin-bottom:calc(.5rem*var(--tw-space-y-reverse))}.space-y-3>:not([hidden])~:not([hidden]){--tw-space-y-reverse:0;margin-top:calc(.75rem*(1 - var(--tw-space-y-reverse)));margin-bottom:calc(.75rem*var(--tw-space-y-reverse))}.space-y-5>:not([hidden])~:not([hidden]){--tw-space-y-reverse:0;margin-top:calc(1.25rem*(1 - var(--tw-space-y-reverse)));margin-bottom:calc(1.25rem*var(--tw-space-y-reverse))}.overflow-hidden{overflow:hidden}.overflow-x-auto{overflow-x:auto}.overflow-y-auto{overflow-y:auto}.whitespace-nowrap{white-space:nowrap}.rounded-2xl{border-radius:1rem}.rounded-full{border-radius:9999px}.rounded-lg{border-radius:.5rem}.rounded-xl{border-radius:.75rem}.border{border-width:1px}.border-b{border-bottom-width:1px}.border-b-2{border-bottom-width:2px}.border-t{border-top-width:1px}.border-\[\#1e293b\]{--tw-border-opacity:1;border-color:rgb(30 41 59/var(--tw-border-opacity,1))}.border-\[\#d5e4f0\]{--tw-border-opacity:1;border-color:rgb(213 228 240/var(--tw-border-opacity,1))}.border-\[\#e6e8e8\]{--tw-border-opacity:1;border-color:rgb(230 232 232/var(--tw-border-opacity,1))}.border-\[\#f0f1f2\]{--tw-border-opacity:1;border-color:rgb(240 241 242/var(--tw-border-opacity,1))}.border-\[\#fdf3e8\]{--tw-border-opacity:1;border-color:rgb(253 243 232/var(--tw-border-opacity,1))}.border-transparent{border-color:#0000}.bg-\[\#02579a\]{--tw-bg-opacity:1;background-color:rgb(2 87 154/var(--tw-bg-opacity,1))}.bg-\[\#1e293b\]{--tw-bg-opacity:1;background-color:rgb(30 41 59/var(--tw-bg-opacity,1))}.bg-\[\#a9adb1\]{--tw-bg-opacity:1;background-color:rgb(169 173 177/var(--tw-bg-opacity,1))}.bg-\[\#c4002b\]{--tw-bg-opacity:1;background-color:rgb(196 0 43/var(--tw-bg-opacity,1))}.bg-\[\#c46b1f\]{--tw-bg-opacity:1;background-color:rgb(196 107 31/var(--tw-bg-opacity,1))}.bg-\[\#e6e8e8\]{--tw-bg-opacity:1;background-color:rgb(230 232 232/var(--tw-bg-opacity,1))}.bg-\[\#e8eef5\]{--tw-bg-opacity:1;background-color:rgb(232 238 245/var(--tw-bg-opacity,1))}.bg-\[\#f2f3f4\]{--tw-bg-opacity:1;background-color:rgb(242 243 244/var(--tw-bg-opacity,1))}.bg-\[\#f7f7f7\]{--tw-bg-opacity:1;background-color:rgb(247 247 247/var(--tw-bg-opacity,1))}.bg-\[\#fdf3e8\]{--tw-bg-opacity:1;background-color:rgb(253 243 232/var(--tw-bg-opacity,1))}.bg-black\/50{background-color:#00000080}.bg-white{--tw-bg-opacity:1;background-color:rgb(255 255 255/var(--tw-bg-opacity,1))}.bg-gradient-to-r{background-image:linear-gradient(to right,var(--tw-gradient-stops))}.from-\[\#1e293b\]{--tw-gradient-from:#1e293b var(--tw-gradient-from-position);--tw-gradient-to:#1e293b00 var(--tw-gradient-to-position);--tw-gradient-stops:var(--tw-gradient-from),var(--tw-gradient-to)}.to-\[\#02579a\]{--tw-gradient-to:#02579a var(--tw-gradient-to-position)}.p-10{padding:2.5rem}.p-3{padding:.75rem}.p-4{padding:1rem}.p-5{padding:1.25rem}.p-8{padding:2rem}.px-2{padding-left:.5rem;padding-right:.5rem}.px-3{padding-left:.75rem;padding-right:.75rem}.px-4{padding-left:1rem;padding-right:1rem}.px-5{padding-left:1.25rem;padding-right:1.25rem}.py-0\.5{padding-top:.125rem;padding-bottom:.125rem}.py-1{padding-top:.25rem;padding-bottom:.25rem}.py-1\.5{padding-top:.375rem;padding-bottom:.375rem}.py-2{padding-top:.5rem;padding-bottom:.5rem}.py-3{padding-top:.75rem;padding-bottom:.75rem}.py-4{padding-top:1rem;padding-bottom:1rem}.py-6{padding-top:1.5rem;padding-bottom:1.5rem}.pl-3{padding-left:.75rem}.pr-3{padding-right:.75rem}.pt-1{padding-top:.25rem}.pt-3{padding-top:.75rem}.text-left{text-align:left}.text-center{text-align:center}.text-right{text-align:right}.font-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,Liberation Mono,Courier New,monospace}.text-2xl{font-size:1.5rem;line-height:2rem}.text-sm{font-size:.875rem;line-height:1.25rem}.text-xl{font-size:1.25rem;line-height:1.75rem}.text-xs{font-size:.75rem;line-height:1rem}.font-bold{font-weight:700}.font-semibold{font-weight:600}.uppercase{text-transform:uppercase}.leading-none{line-height:1}.tracking-wide{letter-spacing:.025em}.text-\[\#00695b\]{--tw-text-opacity:1;color:rgb(0 105 91/var(--tw-text-opacity,1))}.text-\[\#02579a\]{--tw-text-opacity:1;color:rgb(2 87 154/var(--tw-text-opacity,1))}.text-\[\#1e293b\]{--tw-text-opacity:1;color:rgb(30 41 59/var(--tw-text-opacity,1))}.text-\[\#262f3d\]{--tw-text-opacity:1;color:rgb(38 47 61/var(--tw-text-opacity,1))}.text-\[\#4fc2f8\]{--tw-text-opacity:1;color:rgb(79 194 248/var(--tw-text-opacity,1))}.text-\[\#897a6b\]{--tw-text-opacity:1;color:rgb(137 122 107/var(--tw-text-opacity,1))}.text-\[\#a9adb1\]{--tw-text-opacity:1;color:rgb(169 173 177/var(--tw-text-opacity,1))}.text-\[\#c4002b\]{--tw-text-opacity:1;color:rgb(196 0 43/var(--tw-text-opacity,1))}.text-\[\#c46b1f\]{--tw-text-opacity:1;color:rgb(196 107 31/var(--tw-text-opacity,1))}.text-white{--tw-text-opacity:1;color:rgb(255 255 255/var(--tw-text-opacity,1))}.underline{text-decoration-line:underline}.placeholder-\[\#a9adb1\]::-moz-placeholder{--tw-placeholder-opacity:1;color:rgb(169 173 177/var(--tw-placeholder-opacity,1))}.placeholder-\[\#a9adb1\]::placeholder{--tw-placeholder-opacity:1;color:rgb(169 173 177/var(--tw-placeholder-opacity,1))}.opacity-75{opacity:.75}.shadow-lg{--tw-shadow:0 10px 15px -3px #0000001a,0 4px 6px -4px #0000001a;--tw-shadow-colored:0 10px 15px -3px var(--tw-shadow-color),0 4px 6px -4px var(--tw-shadow-color)}.shadow-lg,.shadow-sm{box-shadow:var(--tw-ring-offset-shadow,0 0 #0000),var(--tw-ring-shadow,0 0 #0000),var(--tw-shadow)}.shadow-sm{--tw-shadow:0 1px 2px 0 #0000000d;--tw-shadow-colored:0 1px 2px 0 var(--tw-shadow-color)}.shadow-xl{--tw-shadow:0 20px 25px -5px #0000001a,0 8px 10px -6px #0000001a;--tw-shadow-colored:0 20px 25px -5px var(--tw-shadow-color),0 8px 10px -6px var(--tw-shadow-color);box-shadow:var(--tw-ring-offset-shadow,0 0 #0000),var(--tw-ring-shadow,0 0 #0000),var(--tw-shadow)}.filter{filter:var(--tw-blur) var(--tw-brightness) var(--tw-contrast) var(--tw-grayscale) var(--tw-hue-rotate) var(--tw-invert) var(--tw-saturate) var(--tw-sepia) var(--tw-drop-shadow)}.transition-colors{transition-property:color,background-color,border-color,text-decoration-color,fill,stroke;transition-timing-function:cubic-bezier(.4,0,.2,1);transition-duration:.15s}.transition-transform{transition-property:transform;transition-timing-function:cubic-bezier(.4,0,.2,1);transition-duration:.15s}.hover\:bg-\[\#02579a\]:hover{--tw-bg-opacity:1;background-color:rgb(2 87 154/var(--tw-bg-opacity,1))}.hover\:bg-\[\#fafafa\]:hover{--tw-bg-opacity:1;background-color:rgb(250 250 250/var(--tw-bg-opacity,1))}.hover\:text-\[\#02579a\]:hover{--tw-text-opacity:1;color:rgb(2 87 154/var(--tw-text-opacity,1))}.hover\:text-\[\#1e293b\]:hover{--tw-text-opacity:1;color:rgb(30 41 59/var(--tw-text-opacity,1))}.hover\:text-\[\#262f3d\]:hover{--tw-text-opacity:1;color:rgb(38 47 61/var(--tw-text-opacity,1))}.hover\:text-\[\#c4002b\]:hover{--tw-text-opacity:1;color:rgb(196 0 43/var(--tw-text-opacity,1))}.hover\:text-white:hover{--tw-text-opacity:1;color:rgb(255 255 255/var(--tw-text-opacity,1))}.hover\:underline:hover{text-decoration-line:underline}.hover\:opacity-75:hover{opacity:.75}.focus\:outline-none:focus{outline:2px solid #0000;outline-offset:2px}.focus\:ring-2:focus{--tw-ring-offset-shadow:var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color);--tw-ring-shadow:var(--tw-ring-inset) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color);box-shadow:var(--tw-ring-offset-shadow),var(--tw-ring-shadow),var(--tw-shadow,0 0 #0000)}.focus\:ring-\[\#1e293b\]:focus{--tw-ring-opacity:1;--tw-ring-color:rgb(30 41 59/var(--tw-ring-opacity,1))}.active\:bg-\[\#0f172a\]:active{--tw-bg-opacity:1;background-color:rgb(15 23 42/var(--tw-bg-opacity,1))}@media (min-width:640px){.sm\:block{display:block}.sm\:hidden{display:none}}`;
+
 const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -487,7 +488,7 @@ const HTML = `<!DOCTYPE html>
 <meta name="robots" content="noindex, nofollow">
 <title>Shipping Container Tracker</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Open+Sans:wght@300;400;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.tailwindcss.com"></script>
+<style>${TAILWIND_CSS}</style>
 <style>
   body { font-family: 'Open Sans', sans-serif; }
   .spinner { animation: spin 1s linear infinite; }
@@ -523,6 +524,8 @@ const HTML = `<!DOCTYPE html>
 
 <!-- Main App -->
 <div id="mainApp" class="hidden">
+
+<div id="canaryBanner" class="hidden bg-[#c4002b] text-white text-xs font-semibold px-4 py-2 text-center"></div>
 
 <header class="bg-gradient-to-r from-[#1e293b] to-[#02579a] text-white shadow-lg">
   <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between flex-wrap gap-2">
@@ -784,6 +787,16 @@ var receivedOpen = false;
 var sortState = { Transit: { col: null, dir: 'asc' }, Port: { col: null, dir: 'asc' }, Received: { col: null, dir: 'asc' } };
 var allTransit = [], allPort = [], allReceived = [];
 
+// ── Escaping ──────────────────────────────────────────────────────────────────
+// Everything rendered via innerHTML that comes from MSC or from user input
+// (shipment IDs) goes through esc() first.
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
 function parseDMY(str) {
@@ -795,7 +808,7 @@ function parseDMY(str) {
 
 function fmtDate(str) {
   var d = parseDMY(str);
-  if (!d) return str || '\u2014';
+  if (!d) return str ? esc(str) : '\u2014';
   var m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return d.getDate() + ' ' + m[d.getMonth()] + ' ' + d.getFullYear();
 }
@@ -803,7 +816,7 @@ function fmtDate(str) {
 function fmtDateISO(str) {
   if (!str) return '\u2014';
   var d = new Date(str + 'T00:00:00');
-  if (isNaN(d)) return str;
+  if (isNaN(d)) return esc(str);
   var m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return d.getDate() + ' ' + m[d.getMonth()] + ' ' + d.getFullYear();
 }
@@ -822,7 +835,7 @@ function etaDelta(originalEta, receivedAt) {
 function etaHtml(str, originalEta) {
   if (!str) return '<span style="color:#a9adb1">\u2014</span>';
   var d = parseDMY(str);
-  if (!d) return '<span style="color:#897a6b">' + str + '</span>';
+  if (!d) return '<span style="color:#897a6b">' + esc(str) + '</span>';
   var now = new Date(); now.setHours(0,0,0,0);
   var days = Math.round((d - now) / 86400000);
   var label = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -854,18 +867,18 @@ function statusBadge(r) {
   if (!r.success) return '<span style="' + base + 'background:#fce8ec;color:#c4002b">Error</span>';
   var s = (r.status || '').toLowerCase();
   if (r.delivered || s.includes('deliver')) {
-    return '<span style="' + base + 'background:#e6f4ea;color:#1e7e34">' + (r.status || 'Delivered') + '</span>';
+    return '<span style="' + base + 'background:#e6f4ea;color:#1e7e34">' + esc(r.status || 'Delivered') + '</span>';
   }
   if (s.includes('load') || s.includes('depart') || s.includes('sail') || s.includes('transit')) {
-    return '<span style="' + base + 'background:#e8eef5;color:#02579a">' + r.status + '</span>';
+    return '<span style="' + base + 'background:#e8eef5;color:#02579a">' + esc(r.status) + '</span>';
   }
   if (s.includes('discharg') || s.includes('arriv') || s.includes('import')) {
-    return '<span style="' + base + 'background:#fdf3e8;color:#c46b1f">' + r.status + '</span>';
+    return '<span style="' + base + 'background:#fdf3e8;color:#c46b1f">' + esc(r.status) + '</span>';
   }
   if (s.includes('transship') || s.includes('transfer') || s.includes('customs') || s.includes('gate')) {
-    return '<span style="' + base + 'background:#fdf3e8;color:#c46b1f">' + r.status + '</span>';
+    return '<span style="' + base + 'background:#fdf3e8;color:#c46b1f">' + esc(r.status) + '</span>';
   }
-  return '<span style="' + base + 'background:#f0efee;color:#897a6b">' + (r.status || 'Unknown') + '</span>';
+  return '<span style="' + base + 'background:#f0efee;color:#897a6b">' + esc(r.status || 'Unknown') + '</span>';
 }
 
 function mscLink(cn) {
@@ -883,7 +896,7 @@ function routeHtml(r) {
   var route = r.portOfLoad;
   if (r.transshipments && r.transshipments.length) route += ' \u2192 ' + r.transshipments.join(' \u2192 ');
   route += ' \u2192 ' + (r.portOfDischarge || '?');
-  return '<span style="font-size:0.75rem;color:#897a6b;line-height:1.4">' + route + '</span>';
+  return '<span style="font-size:0.75rem;color:#897a6b;line-height:1.4">' + esc(route) + '</span>';
 }
 
 // ── Action buttons (inner HTML only — wrapper div carries data-actions attr) ──
@@ -907,7 +920,7 @@ function actionsDiv(cn, isReceived) {
 
 function shipmentCellInner(cn, sid) {
   if (sid) {
-    return '<span style="color:#262f3d;font-size:0.8rem">' + sid + '</span>' +
+    return '<span style="color:#262f3d;font-size:0.8rem">' + esc(sid) + '</span>' +
       ' <button onclick="showShipmentEdit(&apos;' + cn + '&apos;)" style="color:#c4c8cc;font-size:0.75rem" title="Edit">&#9998;</button>';
   }
   return '<button onclick="showShipmentEdit(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.75rem" class="hover:text-[#02579a]">+ Add #</button>';
@@ -921,7 +934,7 @@ function showShipmentEdit(cn) {
   var r = lastResults[cn];
   var current = (r && r.shipmentId) ? r.shipmentId : '';
   var html = '<span class="flex items-center gap-1 flex-wrap">' +
-    '<input type="text" class="sedit-' + cn + '" value="' + current.replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '" placeholder="e.g. 0426-NL0102G-SL" style="border:1px solid #e6e8e8;border-radius:6px;padding:2px 6px;font-size:0.75rem;min-width:150px" onkeydown="if(event.key===&apos;Enter&apos;)saveShipment(&apos;' + cn + '&apos;)" />' +
+    '<input type="text" class="sedit-' + cn + '" value="' + esc(current) + '" placeholder="e.g. 0426-NL0102G-SL" style="border:1px solid #e6e8e8;border-radius:6px;padding:2px 6px;font-size:0.75rem;min-width:150px" onkeydown="if(event.key===&apos;Enter&apos;)saveShipment(&apos;' + cn + '&apos;)" />' +
     ' <button onclick="saveShipment(&apos;' + cn + '&apos;)" style="background:#1e293b;color:#fff;font-size:0.7rem;padding:3px 10px;border-radius:6px;font-weight:600">Save</button>' +
     ' <button onclick="cancelShipmentEdit(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.7rem">Cancel</button>' +
     '</span>';
@@ -1125,16 +1138,16 @@ function renderActiveRow(r) {
   if (!r.success) {
     return '<tr class="border-b border-[#f0f1f2] hover:bg-[#fafafa]">' +
       '<td class="px-4 py-3 font-mono font-semibold">' + cn + '</td>' +
-      '<td class="px-4 py-3" colspan="6"><span style="color:#c4002b;font-size:0.75rem">&#9888; ' + (r.error || 'Unknown error') + '</span></td>' +
+      '<td class="px-4 py-3" colspan="6"><span style="color:#c4002b;font-size:0.75rem">&#9888; ' + esc(r.error || 'Unknown error') + '</span></td>' +
       '<td class="px-4 py-3">' + actionsDiv(cn, false) + '</td>' +
       '</tr>';
   }
   return '<tr class="border-b border-[#f0f1f2] hover:bg-[#fafafa] transition-colors">' +
-    '<td class="px-4 py-3"><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + (r.containerType || '') + '</div></td>' +
+    '<td class="px-4 py-3"><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + esc(r.containerType || '') + '</div></td>' +
     '<td class="px-4 py-3">' + shipmentCell(cn, r.shipmentId) + '</td>' +
     '<td class="px-4 py-3">' + statusBadge(r) + '</td>' +
-    '<td class="px-4 py-3"><div style="color:#262f3d">' + (r.currentLocation || '\u2014') + '</div><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + fmtDate(r.lastEventDate) + '</div></td>' +
-    '<td class="px-4 py-3">' + (r.vessel ? '<a href="' + vesselLink(r.vesselIMO, r.vessel) + '" target="_blank" style="color:#02579a;font-size:0.875rem" class="hover:underline">' + r.vessel + '</a><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + (r.voyage || '') + '</div>' : '<span style="color:#a9adb1">\u2014</span>') + '</td>' +
+    '<td class="px-4 py-3"><div style="color:#262f3d">' + esc(r.currentLocation || '\u2014') + '</div><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + fmtDate(r.lastEventDate) + '</div></td>' +
+    '<td class="px-4 py-3">' + (r.vessel ? '<a href="' + vesselLink(r.vesselIMO, r.vessel) + '" target="_blank" style="color:#02579a;font-size:0.875rem" class="hover:underline">' + esc(r.vessel) + '</a><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + esc(r.voyage || '') + '</div>' : '<span style="color:#a9adb1">\u2014</span>') + '</td>' +
     '<td class="px-4 py-3">' + etaHtml(etaStr, r.originalEta) + '</td>' +
     '<td class="px-4 py-3">' + routeHtml(r) + '</td>' +
     '<td class="px-4 py-3 whitespace-nowrap">' + actionsDiv(cn, false) + '</td>' +
@@ -1147,16 +1160,16 @@ function renderActiveCard(r) {
   card.className = 'bg-white rounded-xl p-4 shadow-sm border border-[#e6e8e8]';
   if (!r.success) {
     card.innerHTML = '<div class="flex items-center justify-between mb-2"><span class="font-mono font-semibold">' + cn + '</span>' + statusBadge(r) + '</div>' +
-      '<p style="color:#c4002b;font-size:0.75rem;margin-bottom:8px">' + (r.error || '') + '</p>' + actionsDiv(cn, false);
+      '<p style="color:#c4002b;font-size:0.75rem;margin-bottom:8px">' + esc(r.error || '') + '</p>' + actionsDiv(cn, false);
   } else {
     var etaStr = r.podEtaDate || '';
     card.innerHTML =
-      '<div class="flex items-center justify-between mb-3"><div><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1">' + (r.containerType || '') + '</div></div>' + statusBadge(r) + '</div>' +
+      '<div class="flex items-center justify-between mb-3"><div><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1">' + esc(r.containerType || '') + '</div></div>' + statusBadge(r) + '</div>' +
       '<div class="grid grid-cols-2 gap-y-2 mb-3" style="font-size:0.75rem">' +
         '<span style="color:#897a6b">Shipment #</span><span>' + shipmentCell(cn, r.shipmentId) + '</span>' +
-        '<span style="color:#897a6b">Location</span><span style="color:#262f3d">' + (r.currentLocation || '\u2014') + '</span>' +
+        '<span style="color:#897a6b">Location</span><span style="color:#262f3d">' + esc(r.currentLocation || '\u2014') + '</span>' +
         '<span style="color:#897a6b">Last event</span><span style="color:#262f3d">' + fmtDate(r.lastEventDate) + '</span>' +
-        '<span style="color:#897a6b">Vessel</span><span>' + (r.vessel ? '<a href="' + vesselLink(r.vesselIMO, r.vessel) + '" target="_blank" style="color:#02579a">' + r.vessel + '</a>' : '\u2014') + '</span>' +
+        '<span style="color:#897a6b">Vessel</span><span>' + (r.vessel ? '<a href="' + vesselLink(r.vesselIMO, r.vessel) + '" target="_blank" style="color:#02579a">' + esc(r.vessel) + '</a>' : '\u2014') + '</span>' +
         '<span style="color:#897a6b">ETA</span><span>' + etaHtml(etaStr, r.originalEta) + '</span>' +
       '</div>' +
       '<div class="pt-3" style="border-top:1px solid #f0f1f2">' + actionsDiv(cn, false) + '</div>';
@@ -1208,7 +1221,7 @@ function renderReceivedSection(items, noStore) {
       '<td class="px-4 py-3" style="color:#262f3d">' + fmtDate(r.dischargedAt) + '</td>' +
       '<td class="px-4 py-3" style="color:#262f3d">' + fmtDate(r.originalEta) + '</td>' +
       '<td class="px-4 py-3" style="color:#262f3d">' + fmtDateISO(r.receivedAt) + '</td>' +
-      '<td class="px-4 py-3" style="color:#262f3d">' + (r.receivedPort || '\u2014') + '</td>' +
+      '<td class="px-4 py-3" style="color:#262f3d">' + esc(r.receivedPort || '\u2014') + '</td>' +
       '<td class="px-4 py-3">' + etaDelta(r.originalEta, r.receivedAt) + '</td>' +
       '<td class="px-4 py-3">' + actionsDiv(cn, true) + '</td>' +
       '</tr>';
@@ -1222,7 +1235,7 @@ function renderReceivedSection(items, noStore) {
         '<span style="color:#897a6b">Discharged</span><span>' + fmtDate(r.dischargedAt) + '</span>' +
         '<span style="color:#897a6b">Original ETA</span><span>' + fmtDate(r.originalEta) + '</span>' +
         '<span style="color:#897a6b">Received</span><span>' + fmtDateISO(r.receivedAt) + '</span>' +
-        '<span style="color:#897a6b">Port Received</span><span>' + (r.receivedPort || '\u2014') + '</span>' +
+        '<span style="color:#897a6b">Port Received</span><span>' + esc(r.receivedPort || '\u2014') + '</span>' +
         '<span style="color:#897a6b">Variance</span><span>' + etaDelta(r.originalEta, r.receivedAt) + '</span>' +
       '</div>' +
       '<div class="pt-3" style="border-top:1px solid #f0f1f2">' + actionsDiv(cn, true) + '</div>';
@@ -1268,7 +1281,7 @@ function renderEmbarkStats(received) {
     body.innerHTML = keys.map(function(k) {
       var p = ports[k];
       return '<tr class="border-t border-[#f0f1f2]">' +
-        '<td class="text-left py-1.5 pr-3 font-semibold" style="color:#262f3d">' + k + '</td>' +
+        '<td class="text-left py-1.5 pr-3 font-semibold" style="color:#262f3d">' + esc(k) + '</td>' +
         '<td class="text-right py-1.5 px-3" style="color:#262f3d">' + avg(p.Houston) + '</td>' +
         '<td class="text-right py-1.5 px-3" style="color:#262f3d">' + avg(p.Rotterdam) + '</td>' +
         '<td class="text-right py-1.5 pl-3 font-semibold" style="color:#02579a">' + avg(p.all) + '</td>' +
@@ -1351,9 +1364,9 @@ function showHistory(cn) {
   var html = '';
   r.eventHistory.forEach(function(e) {
     html += '<div style="border-left:2px solid #d5e4f0;padding:4px 0 4px 12px">' +
-      '<div style="font-weight:600;color:#262f3d">' + (e.description || '\u2014') + '</div>' +
-      '<div style="font-size:0.7rem;color:#897a6b;margin-top:2px">' + fmtDate(e.date) + ' &nbsp;&middot;&nbsp; ' + (e.location || '') + '</div>' +
-      (e.vessel ? '<div style="font-size:0.7rem;color:#02579a;margin-top:2px">' + e.vessel + (e.voyage ? ' / ' + e.voyage : '') + '</div>' : '') +
+      '<div style="font-weight:600;color:#262f3d">' + esc(e.description || '\u2014') + '</div>' +
+      '<div style="font-size:0.7rem;color:#897a6b;margin-top:2px">' + fmtDate(e.date) + ' &nbsp;&middot;&nbsp; ' + esc(e.location || '') + '</div>' +
+      (e.vessel ? '<div style="font-size:0.7rem;color:#02579a;margin-top:2px">' + esc(e.vessel) + (e.voyage ? ' / ' + esc(e.voyage) : '') + '</div>' : '') +
       '</div>';
   });
   document.getElementById('modalBody').innerHTML = html || '<p style="color:#a9adb1">No event history available.</p>';
@@ -1405,11 +1418,30 @@ async function submitPasscode() {
 function initApp() {
   document.getElementById('passcodeGate').classList.add('hidden');
   document.getElementById('mainApp').classList.remove('hidden');
-  loadPortsAndVessels();
+  loadPorts();
+  checkCanary();
   trackAll();
 }
 
-async function loadPortsAndVessels() {
+// Shows a warning banner if the daily MSC health check last failed.
+async function checkCanary() {
+  var passcode = sessionStorage.getItem('passcode') || '';
+  try {
+    var res = await fetch('/api/canary', { headers: { 'X-Passcode': passcode } });
+    if (!res.ok) return;
+    var s = await res.json();
+    var banner = document.getElementById('canaryBanner');
+    if (s && s.ok === false) {
+      banner.textContent = '⚠ MSC tracking health check failed on ' + (s.lastRun || '').slice(0, 10) +
+        ' — container data below may be missing or stale. Detail: ' + (s.detail || 'unknown');
+      banner.classList.remove('hidden');
+    } else {
+      banner.classList.add('hidden');
+    }
+  } catch(e) { /* banner is best-effort */ }
+}
+
+async function loadPorts() {
   var passcode = sessionStorage.getItem('passcode') || '';
   try {
     var portsRes = await fetch('/api/ports', { headers: { 'X-Passcode': passcode } });
@@ -1504,8 +1536,8 @@ async function refreshManagementUI() {
         var isCurrent = currentPort && currentPort.id === p.id;
         html += '<div class="flex items-center justify-between rounded-lg p-3 ' + (isCurrent ? 'bg-[#1e293b] text-white' : 'bg-[#f7f7f7]') + '">' +
           '<div>' +
-            '<div class="font-semibold ' + (isCurrent ? 'text-white' : 'text-[#262f3d]') + '">' + p.name + (isCurrent ? ' <span style="font-size:0.65rem;font-weight:600;background:#4fc2f830;border-radius:4px;padding:1px 5px">CURRENT</span>' : '') + '</div>' +
-            '<div class="text-xs ' + (isCurrent ? 'text-[#4fc2f8]' : 'text-[#a9adb1]') + '">' + p.id + ' · ' + p.country + '</div>' +
+            '<div class="font-semibold ' + (isCurrent ? 'text-white' : 'text-[#262f3d]') + '">' + esc(p.name) + (isCurrent ? ' <span style="font-size:0.65rem;font-weight:600;background:#4fc2f830;border-radius:4px;padding:1px 5px">CURRENT</span>' : '') + '</div>' +
+            '<div class="text-xs ' + (isCurrent ? 'text-[#4fc2f8]' : 'text-[#a9adb1]') + '">' + esc(p.id) + ' · ' + esc(p.country) + '</div>' +
           '</div>' +
           '<div class="flex items-center gap-2">' +
             (!isCurrent ? '<button onclick="setCurrentPort(&apos;' + p.id + '&apos;)" class="text-[#02579a] hover:text-[#1e293b] text-xs font-semibold">Set Current</button>' : '') +
@@ -1541,7 +1573,7 @@ async function addPort() {
       document.getElementById('newPortName').value = '';
       document.getElementById('newPortCountry').value = '';
       showMsg('portsMsg', 'Port added', 'success');
-      loadPortsAndVessels();
+      loadPorts();
       refreshManagementUI();
     } else {
       var err = await res.json();
@@ -1556,21 +1588,20 @@ async function deletePort(portId) {
   if (!confirm('Remove this port?')) return;
   var passcode = sessionStorage.getItem('passcode') || '';
   try {
-    var ports = [];
-    var portsRes = await fetch('/api/ports', { headers: { 'X-Passcode': passcode } });
-    if (portsRes.ok) ports = await portsRes.json();
-    ports = ports.filter(function(p) { return p.id !== portId; });
-    var res = await fetch('/api/ports', {
-      method: 'POST',
-      headers: { 'X-Passcode': passcode, 'Content-Type': 'application/json' },
-      body: JSON.stringify(ports)
+    var res = await fetch('/api/ports?id=' + encodeURIComponent(portId), {
+      method: 'DELETE', headers: { 'X-Passcode': passcode }
     });
     if (res.ok) {
-      loadPortsAndVessels();
+      showMsg('portsMsg', 'Port removed', 'success');
+      loadPorts();
       refreshManagementUI();
+    } else {
+      var err = null;
+      try { err = await res.json(); } catch(ignored) {}
+      showMsg('portsMsg', (err && err.error) || 'Failed to remove port', 'error');
     }
   } catch(e) {
-    console.error('Failed to delete port:', e);
+    showMsg('portsMsg', 'Network error: ' + e.message, 'error');
   }
 }
 
@@ -1602,13 +1633,12 @@ export default {
       if (request.method === 'GET') return handleListGet(request, env);
       if (request.method === 'POST') return handleListPost(request, env);
       if (request.method === 'DELETE') return handleListDelete(request, env);
-      if (request.method === 'PUT') return handleListPut(request, env);
     }
     if (url.pathname === '/api/receive' && request.method === 'POST') return handleReceive(request, env);
     if (url.pathname === '/api/shipment' && request.method === 'POST') return handleShipment(request, env);
     if (url.pathname === '/api/ports') return handlePorts(request, env);
-    if (url.pathname === '/api/vessel') return handleVessel(request, env);
     if (url.pathname === '/api/current-port') return handleCurrentPort(request, env);
+    if (url.pathname === '/api/canary' && request.method === 'GET') return handleCanaryGet(request, env);
     if (url.pathname === '/api/debug' && request.method === 'GET') return handleDebug(request, env);
     if (url.pathname === '/robots.txt') return handleRobots();
 
@@ -1618,5 +1648,9 @@ export default {
         'X-Robots-Tag': 'noindex, nofollow',
       },
     });
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runCanary(env));
   },
 };

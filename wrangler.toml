@@ -6,5 +6,10 @@ compatibility_date = "2024-09-23"
 binding = "TRACKER_KV"
 id = "8be56545389845049a7d16faff15ffd0"
 
+# Daily canary: verifies the MSC lookup path (Modal + Akamai bypass) still works.
+# Result lands in KV `canaryStatus`; the dashboard shows a red banner on failure.
+[triggers]
+crons = ["0 6 * * *"]
+
 # Optional: add a custom domain in the Cloudflare dashboard after deploying
 # (e.g. tracker.example.com via Workers Routes)
