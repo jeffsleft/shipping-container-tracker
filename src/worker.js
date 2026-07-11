@@ -854,31 +854,41 @@ function etaHtml(str, originalEta) {
 
 // ── Status helpers ────────────────────────────────────────────────────────────
 
-function classifyStatus(r) {
-  if (r.received) return 'received';
-  if (r.delivered) return 'port';
-  var s = (r.status || '').toLowerCase();
-  if (s.includes('discharg') || s.includes('import') || s.includes('arriv')) return 'port';
-  return 'transit';
-}
-
-function statusBadge(r) {
+// Single source of truth for status interpretation: derives both the dashboard
+// bucket and the rendered badge from one read of the MSC response, so they can't
+// drift apart again (see 2026-07-09 lessons_learned entry).
+function classify(r) {
   var base = 'display:inline-block;padding:2px 8px;border-radius:9999px;font-size:0.7rem;font-weight:600;';
-  if (!r.success) return '<span style="' + base + 'background:#fce8ec;color:#c4002b">Error</span>';
-  var s = (r.status || '').toLowerCase();
-  if (r.delivered || s.includes('deliver')) {
-    return '<span style="' + base + 'background:#e6f4ea;color:#1e7e34">' + esc(r.status || 'Delivered') + '</span>';
+
+  var bucket;
+  if (r.received) {
+    bucket = 'received';
+  } else if (r.delivered) {
+    bucket = 'port';
+  } else {
+    var sb = (r.status || '').toLowerCase();
+    bucket = (sb.includes('discharg') || sb.includes('import') || sb.includes('arriv')) ? 'port' : 'transit';
   }
-  if (s.includes('load') || s.includes('depart') || s.includes('sail') || s.includes('transit')) {
-    return '<span style="' + base + 'background:#e8eef5;color:#02579a">' + esc(r.status) + '</span>';
+
+  var badge;
+  if (!r.success) {
+    badge = '<span style="' + base + 'background:#fce8ec;color:#c4002b">Error</span>';
+  } else {
+    var s = (r.status || '').toLowerCase();
+    if (r.delivered || s.includes('deliver')) {
+      badge = '<span style="' + base + 'background:#e6f4ea;color:#1e7e34">' + esc(r.status || 'Delivered') + '</span>';
+    } else if (s.includes('load') || s.includes('depart') || s.includes('sail') || s.includes('transit')) {
+      badge = '<span style="' + base + 'background:#e8eef5;color:#02579a">' + esc(r.status) + '</span>';
+    } else if (s.includes('discharg') || s.includes('arriv') || s.includes('import')) {
+      badge = '<span style="' + base + 'background:#fdf3e8;color:#c46b1f">' + esc(r.status) + '</span>';
+    } else if (s.includes('transship') || s.includes('transfer') || s.includes('customs') || s.includes('gate')) {
+      badge = '<span style="' + base + 'background:#fdf3e8;color:#c46b1f">' + esc(r.status) + '</span>';
+    } else {
+      badge = '<span style="' + base + 'background:#f0efee;color:#897a6b">' + esc(r.status || 'Unknown') + '</span>';
+    }
   }
-  if (s.includes('discharg') || s.includes('arriv') || s.includes('import')) {
-    return '<span style="' + base + 'background:#fdf3e8;color:#c46b1f">' + esc(r.status) + '</span>';
-  }
-  if (s.includes('transship') || s.includes('transfer') || s.includes('customs') || s.includes('gate')) {
-    return '<span style="' + base + 'background:#fdf3e8;color:#c46b1f">' + esc(r.status) + '</span>';
-  }
-  return '<span style="' + base + 'background:#f0efee;color:#897a6b">' + esc(r.status || 'Unknown') + '</span>';
+
+  return { bucket: bucket, badge: badge };
 }
 
 function mscLink(cn) {
@@ -901,19 +911,20 @@ function routeHtml(r) {
 
 // ── Action buttons (inner HTML only — wrapper div carries data-actions attr) ──
 
-function actionsInner(cn, isReceived) {
+function actionsInner(cn, isReceived, delivered) {
   if (isReceived) {
     return '<a href="' + mscLink(cn) + '" target="_blank" style="color:#02579a;font-size:0.75rem" class="hover:underline">MSC &#8599;</a>' +
       ' <button onclick="removeContainer(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.75rem" class="hover:text-[#c4002b] hover:underline">Remove</button>';
   }
+  var nudge = delivered ? ' <span style="color:#c46b1f;font-size:0.7rem;font-weight:600">Delivered &mdash; mark Received when picked up</span>' : '';
   return '<a href="' + mscLink(cn) + '" target="_blank" style="color:#02579a;font-size:0.75rem" class="hover:underline">MSC &#8599;</a>' +
     ' <button onclick="showHistory(&apos;' + cn + '&apos;)" style="color:#a9adb1;font-size:0.75rem" class="hover:underline underline">History</button>' +
-    ' <button onclick="showReceivePrompt(&apos;' + cn + '&apos;)" style="color:#00695b;font-size:0.75rem;font-weight:600" class="hover:underline">&#10003; Received</button>' +
+    ' <button onclick="showReceivePrompt(&apos;' + cn + '&apos;)" style="color:#00695b;font-size:0.75rem;font-weight:600" class="hover:underline">&#10003; Received</button>' + nudge +
     ' <button onclick="removeContainer(&apos;' + cn + '&apos;)" style="color:#d0d3d4;font-size:0.9rem;line-height:1" class="hover:text-[#c4002b]">&times;</button>';
 }
 
-function actionsDiv(cn, isReceived) {
-  return '<div data-actions="' + cn + '" class="flex gap-2 items-center flex-wrap">' + actionsInner(cn, isReceived) + '</div>';
+function actionsDiv(cn, isReceived, delivered) {
+  return '<div data-actions="' + cn + '" class="flex gap-2 items-center flex-wrap">' + actionsInner(cn, isReceived, delivered) + '</div>';
 }
 
 // ── Shipment # cell ───────────────────────────────────────────────────────────
@@ -983,8 +994,9 @@ function showReceivePrompt(cn) {
 }
 
 function cancelReceive(cn) {
+  var r = lastResults[cn];
   document.querySelectorAll('[data-actions="' + cn + '"]').forEach(function(el) {
-    el.innerHTML = actionsInner(cn, false);
+    el.innerHTML = actionsInner(cn, false, r && r.delivered);
   });
 }
 
@@ -1145,12 +1157,12 @@ function renderActiveRow(r) {
   return '<tr class="border-b border-[#f0f1f2] hover:bg-[#fafafa] transition-colors">' +
     '<td class="px-4 py-3"><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + esc(r.containerType || '') + '</div></td>' +
     '<td class="px-4 py-3">' + shipmentCell(cn, r.shipmentId) + '</td>' +
-    '<td class="px-4 py-3">' + statusBadge(r) + '</td>' +
+    '<td class="px-4 py-3">' + classify(r).badge + '</td>' +
     '<td class="px-4 py-3"><div style="color:#262f3d">' + esc(r.currentLocation || '\u2014') + '</div><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + fmtDate(r.lastEventDate) + '</div></td>' +
     '<td class="px-4 py-3">' + (r.vessel ? '<a href="' + vesselLink(r.vesselIMO, r.vessel) + '" target="_blank" style="color:#02579a;font-size:0.875rem" class="hover:underline">' + esc(r.vessel) + '</a><div style="font-size:0.7rem;color:#a9adb1;margin-top:2px">' + esc(r.voyage || '') + '</div>' : '<span style="color:#a9adb1">\u2014</span>') + '</td>' +
     '<td class="px-4 py-3">' + etaHtml(etaStr, r.originalEta) + '</td>' +
     '<td class="px-4 py-3">' + routeHtml(r) + '</td>' +
-    '<td class="px-4 py-3 whitespace-nowrap">' + actionsDiv(cn, false) + '</td>' +
+    '<td class="px-4 py-3 whitespace-nowrap">' + actionsDiv(cn, false, r.delivered) + '</td>' +
     '</tr>';
 }
 
@@ -1159,12 +1171,12 @@ function renderActiveCard(r) {
   var card = document.createElement('div');
   card.className = 'bg-white rounded-xl p-4 shadow-sm border border-[#e6e8e8]';
   if (!r.success) {
-    card.innerHTML = '<div class="flex items-center justify-between mb-2"><span class="font-mono font-semibold">' + cn + '</span>' + statusBadge(r) + '</div>' +
+    card.innerHTML = '<div class="flex items-center justify-between mb-2"><span class="font-mono font-semibold">' + cn + '</span>' + classify(r).badge + '</div>' +
       '<p style="color:#c4002b;font-size:0.75rem;margin-bottom:8px">' + esc(r.error || '') + '</p>' + actionsDiv(cn, false);
   } else {
     var etaStr = r.podEtaDate || '';
     card.innerHTML =
-      '<div class="flex items-center justify-between mb-3"><div><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1">' + esc(r.containerType || '') + '</div></div>' + statusBadge(r) + '</div>' +
+      '<div class="flex items-center justify-between mb-3"><div><div class="font-mono font-semibold" style="color:#262f3d">' + cn + '</div><div style="font-size:0.7rem;color:#a9adb1">' + esc(r.containerType || '') + '</div></div>' + classify(r).badge + '</div>' +
       '<div class="grid grid-cols-2 gap-y-2 mb-3" style="font-size:0.75rem">' +
         '<span style="color:#897a6b">Shipment #</span><span>' + shipmentCell(cn, r.shipmentId) + '</span>' +
         '<span style="color:#897a6b">Location</span><span style="color:#262f3d">' + esc(r.currentLocation || '\u2014') + '</span>' +
@@ -1172,7 +1184,7 @@ function renderActiveCard(r) {
         '<span style="color:#897a6b">Vessel</span><span>' + (r.vessel ? '<a href="' + vesselLink(r.vesselIMO, r.vessel) + '" target="_blank" style="color:#02579a">' + esc(r.vessel) + '</a>' : '\u2014') + '</span>' +
         '<span style="color:#897a6b">ETA</span><span>' + etaHtml(etaStr, r.originalEta) + '</span>' +
       '</div>' +
-      '<div class="pt-3" style="border-top:1px solid #f0f1f2">' + actionsDiv(cn, false) + '</div>';
+      '<div class="pt-3" style="border-top:1px solid #f0f1f2">' + actionsDiv(cn, false, r.delivered) + '</div>';
   }
   return card;
 }
@@ -1297,7 +1309,7 @@ function renderResults(results) {
     lastResults[r.containerNumber] = r;
     if (r.received) { received.push(r); return; }
     if (!r.success) { transit.push(r); return; }
-    if (classifyStatus(r) === 'port') port.push(r); else transit.push(r);
+    if (classify(r).bucket === 'port') port.push(r); else transit.push(r);
   });
   document.getElementById('sumTransit').textContent = transit.length;
   document.getElementById('sumPort').textContent = port.length;
